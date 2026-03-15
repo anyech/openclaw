@@ -1,30 +1,26 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { OpenClawConfig } from "../../config/config.js";
+import {
+  loadResolvedExtensionRegistry,
+  type ResolvedExtensionRegistry,
+} from "../../extension-host/resolved-registry.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
   normalizePluginsConfig,
   resolveEffectiveEnableState,
   resolveMemorySlotDecision,
 } from "../../plugins/config-state.js";
-import { loadPluginManifestRegistry } from "../../plugins/manifest-registry.js";
 import { isPathInsideWithRealpath } from "../../security/scan-paths.js";
 
 const log = createSubsystemLogger("skills");
 
-export function resolvePluginSkillDirs(params: {
-  workspaceDir: string | undefined;
+export function collectPluginSkillDirsFromRegistry(params: {
+  registry: ResolvedExtensionRegistry;
   config?: OpenClawConfig;
 }): string[] {
-  const workspaceDir = (params.workspaceDir ?? "").trim();
-  if (!workspaceDir) {
-    return [];
-  }
-  const registry = loadPluginManifestRegistry({
-    workspaceDir,
-    config: params.config,
-  });
-  if (registry.plugins.length === 0) {
+  const registry = params.registry;
+  if (registry.extensions.length === 0) {
     return [];
   }
   const normalizedPlugins = normalizePluginsConfig(params.config?.plugins);
@@ -34,13 +30,15 @@ export function resolvePluginSkillDirs(params: {
   const seen = new Set<string>();
   const resolved: string[] = [];
 
-  for (const record of registry.plugins) {
-    if (!record.skills || record.skills.length === 0) {
+  for (const record of registry.extensions) {
+    const extension = record.extension;
+    const skillPaths = extension.manifest.skills ?? [];
+    if (skillPaths.length === 0) {
       continue;
     }
     const enableState = resolveEffectiveEnableState({
-      id: record.id,
-      origin: record.origin,
+      id: extension.id,
+      origin: extension.origin ?? "workspace",
       config: normalizedPlugins,
       rootConfig: params.config,
     });
@@ -48,33 +46,34 @@ export function resolvePluginSkillDirs(params: {
       continue;
     }
     // ACP router skills should not be attached when ACP is explicitly disabled.
-    if (!acpEnabled && record.id === "acpx") {
+    if (!acpEnabled && extension.id === "acpx") {
       continue;
     }
     const memoryDecision = resolveMemorySlotDecision({
-      id: record.id,
-      kind: record.kind,
+      id: extension.id,
+      kind: extension.kind,
       slot: memorySlot,
       selectedId: selectedMemoryPluginId,
     });
     if (!memoryDecision.enabled) {
       continue;
     }
-    if (memoryDecision.selected && record.kind === "memory") {
-      selectedMemoryPluginId = record.id;
+    if (memoryDecision.selected && extension.kind === "memory") {
+      selectedMemoryPluginId = extension.id;
     }
-    for (const raw of record.skills) {
+    const rootDir = extension.rootDir ?? path.dirname(record.manifestPath);
+    for (const raw of skillPaths) {
       const trimmed = raw.trim();
       if (!trimmed) {
         continue;
       }
-      const candidate = path.resolve(record.rootDir, trimmed);
+      const candidate = path.resolve(rootDir, trimmed);
       if (!fs.existsSync(candidate)) {
-        log.warn(`plugin skill path not found (${record.id}): ${candidate}`);
+        log.warn(`plugin skill path not found (${extension.id}): ${candidate}`);
         continue;
       }
-      if (!isPathInsideWithRealpath(record.rootDir, candidate, { requireRealpath: true })) {
-        log.warn(`plugin skill path escapes plugin root (${record.id}): ${candidate}`);
+      if (!isPathInsideWithRealpath(rootDir, candidate, { requireRealpath: true })) {
+        log.warn(`plugin skill path escapes plugin root (${extension.id}): ${candidate}`);
         continue;
       }
       if (seen.has(candidate)) {
@@ -86,4 +85,22 @@ export function resolvePluginSkillDirs(params: {
   }
 
   return resolved;
+}
+
+export function resolvePluginSkillDirs(params: {
+  workspaceDir: string | undefined;
+  config?: OpenClawConfig;
+}): string[] {
+  const workspaceDir = (params.workspaceDir ?? "").trim();
+  if (!workspaceDir) {
+    return [];
+  }
+  const registry = loadResolvedExtensionRegistry({
+    workspaceDir,
+    config: params.config,
+  });
+  return collectPluginSkillDirsFromRegistry({
+    registry,
+    config: params.config,
+  });
 }

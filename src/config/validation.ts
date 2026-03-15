@@ -1,12 +1,12 @@
 import path from "node:path";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { CHANNEL_IDS, normalizeChatChannelId } from "../channels/registry.js";
+import { loadResolvedExtensionRegistry } from "../extension-host/resolved-registry.js";
 import {
   normalizePluginsConfig,
   resolveEffectiveEnableState,
   resolveMemorySlotDecision,
 } from "../plugins/config-state.js";
-import { loadPluginManifestRegistry } from "../plugins/manifest-registry.js";
 import { validateJsonSchemaValue } from "../plugins/schema-validator.js";
 import {
   hasAvatarUriScheme,
@@ -21,6 +21,7 @@ import { findDuplicateAgentDirs, formatDuplicateAgentDirError } from "./agent-di
 import { appendAllowedValuesHint, summarizeAllowedValues } from "./allowed-values.js";
 import { applyAgentDefaults, applyModelDefaults, applySessionDefaults } from "./defaults.js";
 import { findLegacyConfigIssues } from "./legacy.js";
+import { buildResolvedExtensionValidationIndex } from "./resolved-extension-validation.js";
 import type { OpenClawConfig, ConfigValidationIssue } from "./types.js";
 import { OpenClawSchema } from "./zod-schema.js";
 
@@ -335,7 +336,8 @@ function validateConfigObjectWithPluginsBase(
   };
 
   type RegistryInfo = {
-    registry: ReturnType<typeof loadPluginManifestRegistry>;
+    registry: ReturnType<typeof loadResolvedExtensionRegistry>;
+    validationIndex?: ReturnType<typeof buildResolvedExtensionValidationIndex>;
     knownIds?: Set<string>;
     normalizedPlugins?: ReturnType<typeof normalizePluginsConfig>;
   };
@@ -348,7 +350,7 @@ function validateConfigObjectWithPluginsBase(
     }
 
     const workspaceDir = resolveAgentWorkspaceDir(config, resolveDefaultAgentId(config));
-    const registry = loadPluginManifestRegistry({
+    const registry = loadResolvedExtensionRegistry({
       config,
       workspaceDir: workspaceDir ?? undefined,
       env: opts.env,
@@ -374,10 +376,19 @@ function validateConfigObjectWithPluginsBase(
 
   const ensureKnownIds = (): Set<string> => {
     const info = ensureRegistry();
-    if (!info.knownIds) {
-      info.knownIds = new Set(info.registry.plugins.map((record) => record.id));
+    if (!info.validationIndex) {
+      info.validationIndex = buildResolvedExtensionValidationIndex(info.registry);
     }
+    info.knownIds ??= info.validationIndex.knownIds;
     return info.knownIds;
+  };
+
+  const ensureValidationIndex = (): ReturnType<typeof buildResolvedExtensionValidationIndex> => {
+    const info = ensureRegistry();
+    if (!info.validationIndex) {
+      info.validationIndex = buildResolvedExtensionValidationIndex(info.registry);
+    }
+    return info.validationIndex;
   };
 
   const ensureNormalizedPlugins = (): ReturnType<typeof normalizePluginsConfig> => {
@@ -397,11 +408,9 @@ function validateConfigObjectWithPluginsBase(
         continue;
       }
       if (!allowedChannels.has(trimmed)) {
-        const { registry } = ensureRegistry();
-        for (const record of registry.plugins) {
-          for (const channelId of record.channels) {
-            allowedChannels.add(channelId);
-          }
+        const validationIndex = ensureValidationIndex();
+        for (const channelId of validationIndex.channelIds) {
+          allowedChannels.add(channelId);
         }
       }
       if (!allowedChannels.has(trimmed)) {
@@ -435,14 +444,9 @@ function validateConfigObjectWithPluginsBase(
       return;
     }
     if (!heartbeatChannelIds.has(normalized)) {
-      const { registry } = ensureRegistry();
-      for (const record of registry.plugins) {
-        for (const channelId of record.channels) {
-          const pluginChannel = channelId.trim();
-          if (pluginChannel) {
-            heartbeatChannelIds.add(pluginChannel.toLowerCase());
-          }
-        }
+      const validationIndex = ensureValidationIndex();
+      for (const channelId of validationIndex.lowercaseChannelIds) {
+        heartbeatChannelIds.add(channelId);
       }
     }
     if (heartbeatChannelIds.has(normalized)) {
@@ -468,7 +472,7 @@ function validateConfigObjectWithPluginsBase(
     return { ok: true, config, warnings };
   }
 
-  const { registry } = ensureRegistry();
+  const validationIndex = ensureValidationIndex();
   const knownIds = ensureKnownIds();
   const normalizedPlugins = ensureNormalizedPlugins();
   const pushMissingPluginIssue = (
@@ -544,7 +548,7 @@ function validateConfigObjectWithPluginsBase(
 
   let selectedMemoryPluginId: string | null = null;
   const seenPlugins = new Set<string>();
-  for (const record of registry.plugins) {
+  for (const record of validationIndex.entries) {
     const pluginId = record.id;
     if (seenPlugins.has(pluginId)) {
       continue;

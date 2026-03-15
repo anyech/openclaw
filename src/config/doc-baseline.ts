@@ -3,8 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ChannelPlugin } from "../channels/plugins/index.js";
+import {
+  loadResolvedExtensionRegistry,
+  type ResolvedExtensionRegistry,
+} from "../extension-host/resolved-registry.js";
 import { resolveOpenClawPackageRootSync } from "../infra/openclaw-root.js";
-import { loadPluginManifestRegistry } from "../plugins/manifest-registry.js";
 import { FIELD_HELP } from "./schema.help.js";
 import { buildConfigSchema, type ConfigSchemaResponse } from "./schema.js";
 
@@ -355,29 +358,41 @@ async function loadBundledConfigSchemaResponse(): Promise<ConfigSchemaResponse> 
     OPENCLAW_BUNDLED_PLUGINS_DIR: path.join(repoRoot, "extensions"),
   };
 
-  const manifestRegistry = loadPluginManifestRegistry({
+  const registry = loadResolvedExtensionRegistry({
     cache: false,
     env,
     config: {},
   });
+  return buildBundledConfigSchemaResponseFromRegistry(registry);
+}
+
+async function buildBundledConfigSchemaResponseFromRegistry(
+  registry: ResolvedExtensionRegistry,
+): Promise<ConfigSchemaResponse> {
   const channelPlugins = await Promise.all(
-    manifestRegistry.plugins
-      .filter((plugin) => plugin.origin === "bundled" && plugin.channels.length > 0)
-      .map(async (plugin) => ({
-        id: plugin.id,
-        channel: await importChannelPluginModule(plugin.rootDir),
+    registry.extensions
+      .filter(
+        (record) =>
+          record.extension.origin === "bundled" &&
+          (record.extension.manifest.channels?.length ?? 0) > 0,
+      )
+      .map(async (record) => ({
+        id: record.extension.id,
+        channel: await importChannelPluginModule(
+          record.extension.rootDir ?? path.dirname(record.manifestPath),
+        ),
       })),
   );
 
   return buildConfigSchema({
-    plugins: manifestRegistry.plugins
-      .filter((plugin) => plugin.origin === "bundled")
-      .map((plugin) => ({
-        id: plugin.id,
-        name: plugin.name,
-        description: plugin.description,
-        configUiHints: plugin.configUiHints,
-        configSchema: plugin.configSchema,
+    plugins: registry.extensions
+      .filter((record) => record.extension.origin === "bundled")
+      .map((record) => ({
+        id: record.extension.id,
+        name: record.extension.name,
+        description: record.extension.description,
+        configUiHints: record.extension.staticMetadata.configUiHints,
+        configSchema: record.extension.staticMetadata.configSchema,
       })),
     channels: channelPlugins.map((entry) => ({
       id: entry.channel.id,

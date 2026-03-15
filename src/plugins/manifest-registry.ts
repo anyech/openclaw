@@ -1,5 +1,9 @@
 import fs from "node:fs";
 import type { OpenClawConfig } from "../config/config.js";
+import {
+  buildResolvedExtensionRecord,
+  type ResolvedExtensionRecord,
+} from "../extension-host/manifest-registry.js";
 import { resolveUserPath } from "../utils.js";
 import { loadBundleManifest } from "./bundle-manifest.js";
 import { normalizePluginsConfig, type NormalizedPluginsConfig } from "./config-state.js";
@@ -52,6 +56,7 @@ export type PluginManifestRecord = {
   schemaCacheKey?: string;
   configSchema?: Record<string, unknown>;
   configUiHints?: Record<string, PluginConfigUiHint>;
+  resolvedExtension: ResolvedExtensionRecord["extension"];
 };
 
 export type PluginManifestRegistry = {
@@ -129,6 +134,7 @@ function buildRecord(params: {
   schemaCacheKey?: string;
   configSchema?: Record<string, unknown>;
 }): PluginManifestRecord {
+  const resolved = buildResolvedExtensionRecord(params);
   return {
     id: params.manifest.id,
     name: normalizeManifestLabel(params.manifest.name) ?? params.candidate.packageName,
@@ -151,6 +157,7 @@ function buildRecord(params: {
     schemaCacheKey: params.schemaCacheKey,
     configSchema: params.configSchema,
     configUiHints: params.manifest.uiHints,
+    resolvedExtension: resolved.extension,
   };
 }
 

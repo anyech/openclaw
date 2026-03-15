@@ -10,9 +10,11 @@ import {
   normalizeChatChannelId,
 } from "../channels/registry.js";
 import {
-  loadPluginManifestRegistry,
-  type PluginManifestRegistry,
-} from "../plugins/manifest-registry.js";
+  loadResolvedExtensionRegistry,
+  resolvedExtensionRegistryFromPluginManifestRegistry,
+  type ResolvedExtensionRegistry,
+} from "../extension-host/resolved-registry.js";
+import { type PluginManifestRegistry } from "../plugins/manifest-registry.js";
 import { isRecord } from "../utils.js";
 import type { OpenClawConfig } from "./config.js";
 import { ensurePluginAllowlisted } from "./plugins-allowlist.js";
@@ -283,12 +285,12 @@ function isProviderConfigured(cfg: OpenClawConfig, providerId: string): boolean 
   return false;
 }
 
-function buildChannelToPluginIdMap(registry: PluginManifestRegistry): Map<string, string> {
+function buildChannelToPluginIdMap(registry: ResolvedExtensionRegistry): Map<string, string> {
   const map = new Map<string, string>();
-  for (const record of registry.plugins) {
-    for (const channelId of record.channels) {
+  for (const record of registry.extensions) {
+    for (const channelId of record.extension.manifest.channels ?? []) {
       if (channelId && !map.has(channelId)) {
-        map.set(channelId, record.id);
+        map.set(channelId, record.extension.id);
       }
     }
   }
@@ -336,7 +338,7 @@ function collectCandidateChannelIds(cfg: OpenClawConfig, env: NodeJS.ProcessEnv)
 function resolveConfiguredPlugins(
   cfg: OpenClawConfig,
   env: NodeJS.ProcessEnv,
-  registry: PluginManifestRegistry,
+  registry: ResolvedExtensionRegistry,
 ): PluginEnableChange[] {
   const changes: PluginEnableChange[] = [];
   // Build reverse map: channel ID → plugin ID from installed plugin manifests.
@@ -471,17 +473,39 @@ function formatAutoEnableChange(entry: PluginEnableChange): string {
   return `${reason}, enabled automatically.`;
 }
 
+function resolveAutoEnableRegistry(params: {
+  config: OpenClawConfig;
+  env: NodeJS.ProcessEnv;
+  resolvedRegistry?: ResolvedExtensionRegistry;
+  manifestRegistry?: PluginManifestRegistry;
+}): ResolvedExtensionRegistry {
+  if (params.resolvedRegistry) {
+    return params.resolvedRegistry;
+  }
+  if (params.manifestRegistry) {
+    return resolvedExtensionRegistryFromPluginManifestRegistry(params.manifestRegistry);
+  }
+  return loadResolvedExtensionRegistry({ config: params.config, env: params.env });
+}
+
 export function applyPluginAutoEnable(params: {
   config: OpenClawConfig;
   env?: NodeJS.ProcessEnv;
+  /** Pre-loaded resolved-extension registry. Prefer this over manifestRegistry
+   *  for new callers so static consumers stay on the host-owned boundary. */
+  resolvedRegistry?: ResolvedExtensionRegistry;
   /** Pre-loaded manifest registry. When omitted, the registry is loaded from
-   *  the installed plugins on disk. Pass an explicit registry in tests to
-   *  avoid filesystem access and control what plugins are "installed". */
+   *  the installed plugins on disk. This remains as a compatibility input for
+   *  older callers; prefer resolvedRegistry for new code. */
   manifestRegistry?: PluginManifestRegistry;
 }): PluginAutoEnableResult {
   const env = params.env ?? process.env;
-  const registry =
-    params.manifestRegistry ?? loadPluginManifestRegistry({ config: params.config, env });
+  const registry = resolveAutoEnableRegistry({
+    config: params.config,
+    env,
+    resolvedRegistry: params.resolvedRegistry,
+    manifestRegistry: params.manifestRegistry,
+  });
   const configured = resolveConfiguredPlugins(params.config, env, registry);
   if (configured.length === 0) {
     return { config: params.config, changes: [] };

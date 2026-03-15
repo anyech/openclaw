@@ -1,8 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { requireActiveExtensionHostRegistry } from "../extension-host/active-registry.js";
 import { normalizePluginHttpPath } from "./http-path.js";
 import { findOverlappingPluginHttpRoute } from "./http-route-overlap.js";
 import type { PluginHttpRouteRegistration, PluginRegistry } from "./registry.js";
-import { requireActivePluginRegistry } from "./runtime.js";
 
 export type PluginHttpRouteHandler = (
   req: IncomingMessage,
@@ -22,7 +22,7 @@ export function registerPluginHttpRoute(params: {
   log?: (message: string) => void;
   registry?: PluginRegistry;
 }): () => void {
-  const registry = params.registry ?? requireActivePluginRegistry();
+  const registry = params.registry ?? requireActiveExtensionHostRegistry();
   const routes = registry.httpRoutes ?? [];
   registry.httpRoutes = routes;
 

@@ -1,4 +1,3 @@
-import path from "node:path";
 import type { AnyAgentTool } from "../agents/tools/common.js";
 import type { ChannelDock } from "../channels/dock.js";
 import type { ChannelPlugin } from "../channels/plugins/types.js";
@@ -8,7 +7,6 @@ import type {
   GatewayRequestHandlers,
 } from "../gateway/server-methods/types.js";
 import { registerInternalHook } from "../hooks/internal-hooks.js";
-import type { HookEntry } from "../hooks/types.js";
 import { resolveUserPath } from "../utils.js";
 import { registerPluginCommand } from "./commands.js";
 import { normalizePluginHttpPath } from "./http-path.js";
@@ -18,7 +16,6 @@ import { normalizeRegisteredProvider } from "./provider-validation.js";
 import type { PluginRuntime } from "./runtime/types.js";
 import { defaultSlotIdForKey } from "./slots.js";
 import {
-  isPluginHookName,
   isPromptInjectionHookName,
   stripPromptMutationFieldsFromLegacyHookResult,
 } from "./types.js";
@@ -34,7 +31,6 @@ import type {
   OpenClawPluginHookOptions,
   ProviderPlugin,
   OpenClawPluginService,
-  OpenClawPluginToolContext,
   OpenClawPluginToolFactory,
   PluginConfigUiHint,
   PluginDiagnostic,
@@ -239,6 +235,10 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       source: record.source,
       rootDir: record.rootDir,
     });
+    if (result.names.length > 0) {
+      record.toolNames.push(...result.names);
+    }
+    registry.tools.push(result.entry);
   };
 
   const registerHook = (
@@ -248,16 +248,19 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     opts: OpenClawPluginHookOptions | undefined,
     config: OpenClawPluginApi["config"],
   ) => {
-    const eventList = Array.isArray(events) ? events : [events];
-    const normalizedEvents = eventList.map((event) => event.trim()).filter(Boolean);
-    const entry = opts?.entry ?? null;
-    const name = entry?.hook.name ?? opts?.name?.trim();
-    if (!name) {
+    const normalized = resolveExtensionLegacyHookRegistration({
+      ownerPluginId: record.id,
+      ownerSource: record.source,
+      events,
+      handler,
+      opts,
+    });
+    if (!normalized.ok) {
       pushDiagnostic({
         level: "warn",
         pluginId: record.id,
         source: record.source,
-        message: "hook registration missing name",
+        message: normalized.message,
       });
       return;
     }
@@ -305,10 +308,10 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
 
     record.hookNames.push(name);
     registry.hooks.push({
-      pluginId: record.id,
-      entry: hookEntry,
-      events: normalizedEvents,
-      source: record.source,
+      pluginId: normalized.entry.pluginId,
+      entry: normalized.entry.entry,
+      events: normalized.events,
+      source: normalized.entry.source,
     });
 
     const hookSystemEnabled = config?.hooks?.internal?.enabled === true;
@@ -316,7 +319,7 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       return;
     }
 
-    for (const event of normalizedEvents) {
+    for (const event of normalized.events) {
       registerInternalHook(event, handler);
     }
   };
@@ -326,111 +329,50 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     method: string,
     handler: GatewayRequestHandler,
   ) => {
-    const trimmed = method.trim();
-    if (!trimmed) {
-      return;
-    }
-    if (coreGatewayMethods.has(trimmed) || registry.gatewayHandlers[trimmed]) {
+    const result = resolveExtensionGatewayMethodRegistration({
+      existing: registry.gatewayHandlers,
+      coreGatewayMethods,
+      method,
+      handler,
+    });
+    if (!result.ok) {
       pushDiagnostic({
         level: "error",
         pluginId: record.id,
         source: record.source,
-        message: `gateway method already registered: ${trimmed}`,
+        message: result.message,
       });
       return;
     }
-    registry.gatewayHandlers[trimmed] = handler;
-    record.gatewayMethods.push(trimmed);
-  };
-
-  const describeHttpRouteOwner = (entry: PluginHttpRouteRegistration): string => {
-    const plugin = entry.pluginId?.trim() || "unknown-plugin";
-    const source = entry.source?.trim() || "unknown-source";
-    return `${plugin} (${source})`;
+    registry.gatewayHandlers[result.method] = result.handler;
+    record.gatewayMethods.push(result.method);
   };
 
   const registerHttpRoute = (record: PluginRecord, params: OpenClawPluginHttpRouteParams) => {
-    const normalizedPath = normalizePluginHttpPath(params.path);
-    if (!normalizedPath) {
-      pushDiagnostic({
-        level: "warn",
-        pluginId: record.id,
-        source: record.source,
-        message: "http route registration missing path",
-      });
-      return;
-    }
-    if (params.auth !== "gateway" && params.auth !== "plugin") {
-      pushDiagnostic({
-        level: "error",
-        pluginId: record.id,
-        source: record.source,
-        message: `http route registration missing or invalid auth: ${normalizedPath}`,
-      });
-      return;
-    }
-    const match = params.match ?? "exact";
-    const overlappingRoute = findOverlappingPluginHttpRoute(registry.httpRoutes, {
-      path: normalizedPath,
-      match,
+    const result = resolveExtensionHttpRouteRegistration({
+      existing: registry.httpRoutes,
+      ownerPluginId: record.id,
+      ownerSource: record.source,
+      route: params,
     });
-    if (overlappingRoute && overlappingRoute.auth !== params.auth) {
+    if (!result.ok) {
       pushDiagnostic({
-        level: "error",
+        level: result.message === "http route registration missing path" ? "warn" : "error",
         pluginId: record.id,
         source: record.source,
-        message:
-          `http route overlap rejected: ${normalizedPath} (${match}, ${params.auth}) ` +
-          `overlaps ${overlappingRoute.path} (${overlappingRoute.match}, ${overlappingRoute.auth}) ` +
-          `owned by ${describeHttpRouteOwner(overlappingRoute)}`,
+        message: result.message,
       });
       return;
     }
-    const existingIndex = registry.httpRoutes.findIndex(
-      (entry) => entry.path === normalizedPath && entry.match === match,
-    );
-    if (existingIndex >= 0) {
-      const existing = registry.httpRoutes[existingIndex];
-      if (!existing) {
+    if (result.action === "replace") {
+      if (result.existingIndex === undefined) {
         return;
       }
-      if (!params.replaceExisting) {
-        pushDiagnostic({
-          level: "error",
-          pluginId: record.id,
-          source: record.source,
-          message: `http route already registered: ${normalizedPath} (${match}) by ${describeHttpRouteOwner(existing)}`,
-        });
-        return;
-      }
-      if (existing.pluginId && existing.pluginId !== record.id) {
-        pushDiagnostic({
-          level: "error",
-          pluginId: record.id,
-          source: record.source,
-          message: `http route replacement rejected: ${normalizedPath} (${match}) owned by ${describeHttpRouteOwner(existing)}`,
-        });
-        return;
-      }
-      registry.httpRoutes[existingIndex] = {
-        pluginId: record.id,
-        path: normalizedPath,
-        handler: params.handler,
-        auth: params.auth,
-        match,
-        source: record.source,
-      };
+      registry.httpRoutes[result.existingIndex] = result.entry;
       return;
     }
     record.httpRoutes += 1;
-    registry.httpRoutes.push({
-      pluginId: record.id,
-      path: normalizedPath,
-      handler: params.handler,
-      auth: params.auth,
-      match,
-      source: record.source,
-    });
+    registry.httpRoutes.push(result.entry);
   };
 
   const registerChannel = (
@@ -471,6 +413,17 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       source: record.source,
       rootDir: record.rootDir,
     });
+    if (!result.ok) {
+      pushDiagnostic({
+        level: "error",
+        pluginId: record.id,
+        source: record.source,
+        message: result.message,
+      });
+      return;
+    }
+    record.channelIds.push(result.channelId);
+    registry.channels.push(result.entry);
   };
 
   const registerProvider = (record: PluginRecord, provider: ProviderPlugin) => {
@@ -483,14 +436,18 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     if (!normalizedProvider) {
       return;
     }
-    const id = normalizedProvider.id;
-    const existing = registry.providers.find((entry) => entry.provider.id === id);
-    if (existing) {
+    const result = resolveExtensionProviderRegistration({
+      existing: registry.providers,
+      ownerPluginId: record.id,
+      ownerSource: record.source,
+      provider: normalizedProvider,
+    });
+    if (!result.ok) {
       pushDiagnostic({
         level: "error",
         pluginId: record.id,
         source: record.source,
-        message: `provider already registered: ${id} (${existing.pluginId})`,
+        message: result.message,
       });
       return;
     }
@@ -541,11 +498,17 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       source: record.source,
       rootDir: record.rootDir,
     });
+    record.cliCommands.push(...result.commands);
+    registry.cliRegistrars.push(result.entry);
   };
 
   const registerService = (record: PluginRecord, service: OpenClawPluginService) => {
-    const id = service.id.trim();
-    if (!id) {
+    const result = resolveExtensionServiceRegistration({
+      ownerPluginId: record.id,
+      ownerSource: record.source,
+      service,
+    });
+    if (!result.ok) {
       return;
     }
     const existing = registry.services.find((entry) => entry.service.id === id);
@@ -569,13 +532,17 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
   };
 
   const registerCommand = (record: PluginRecord, command: OpenClawPluginCommandDefinition) => {
-    const name = command.name.trim();
-    if (!name) {
+    const normalized = resolveExtensionCommandRegistration({
+      ownerPluginId: record.id,
+      ownerSource: record.source,
+      command,
+    });
+    if (!normalized.ok) {
       pushDiagnostic({
         level: "error",
         pluginId: record.id,
         source: record.source,
-        message: "command registration missing name",
+        message: normalized.message,
       });
       return;
     }
@@ -612,32 +579,39 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     opts?: { priority?: number },
     policy?: PluginTypedHookPolicy,
   ) => {
-    if (!isPluginHookName(hookName)) {
+    const normalized = resolveExtensionTypedHookRegistration({
+      ownerPluginId: record.id,
+      ownerSource: record.source,
+      hookName,
+      handler,
+      priority: opts?.priority,
+    });
+    if (!normalized.ok) {
       pushDiagnostic({
         level: "warn",
         pluginId: record.id,
         source: record.source,
-        message: `unknown typed hook "${String(hookName)}" ignored`,
+        message: normalized.message,
       });
       return;
     }
-    let effectiveHandler = handler;
-    if (policy?.allowPromptInjection === false && isPromptInjectionHookName(hookName)) {
-      if (hookName === "before_prompt_build") {
+    let effectiveHandler = normalized.entry.handler;
+    if (policy?.allowPromptInjection === false && isPromptInjectionHookName(normalized.hookName)) {
+      if (normalized.hookName === "before_prompt_build") {
         pushDiagnostic({
           level: "warn",
           pluginId: record.id,
           source: record.source,
-          message: `typed hook "${hookName}" blocked by plugins.entries.${record.id}.hooks.allowPromptInjection=false`,
+          message: `typed hook "${normalized.hookName}" blocked by plugins.entries.${record.id}.hooks.allowPromptInjection=false`,
         });
         return;
       }
-      if (hookName === "before_agent_start") {
+      if (normalized.hookName === "before_agent_start") {
         pushDiagnostic({
           level: "warn",
           pluginId: record.id,
           source: record.source,
-          message: `typed hook "${hookName}" prompt fields constrained by plugins.entries.${record.id}.hooks.allowPromptInjection=false`,
+          message: `typed hook "${normalized.hookName}" prompt fields constrained by plugins.entries.${record.id}.hooks.allowPromptInjection=false`,
         });
         effectiveHandler = constrainLegacyPromptInjectionHook(
           handler as PluginHookHandlerMap["before_agent_start"],
@@ -646,11 +620,10 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     }
     record.hookCount += 1;
     registry.typedHooks.push({
+      ...normalized.entry,
       pluginId: record.id,
-      hookName,
+      hookName: normalized.hookName,
       handler: effectiveHandler,
-      priority: opts?.priority,
-      source: record.source,
     } as TypedPluginHookRegistration);
   };
 

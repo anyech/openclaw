@@ -1,5 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import {
+  DEFAULT_EXTENSION_ENTRY_CANDIDATES,
+  getExtensionPackageMetadata,
+  resolveExtensionEntryCandidates,
+  type PackageManifest,
+  type OpenClawPackageManifest,
+} from "../extension-host/schema.js";
 import { openBoundaryFileSync } from "../infra/boundary-file-read.js";
 import { resolveUserPath } from "../utils.js";
 import { detectBundleManifestFormat, loadBundleManifest } from "./bundle-manifest.js";
@@ -299,27 +306,6 @@ function shouldIgnoreScannedDirectory(dirName: string): boolean {
   return false;
 }
 
-function readPackageManifest(dir: string, rejectHardlinks = true): PackageManifest | null {
-  const manifestPath = path.join(dir, "package.json");
-  const opened = openBoundaryFileSync({
-    absolutePath: manifestPath,
-    rootPath: dir,
-    boundaryLabel: "plugin package directory",
-    rejectHardlinks,
-  });
-  if (!opened.ok) {
-    return null;
-  }
-  try {
-    const raw = fs.readFileSync(opened.fd, "utf-8");
-    return JSON.parse(raw) as PackageManifest;
-  } catch {
-    return null;
-  } finally {
-    fs.closeSync(opened.fd);
-  }
-}
-
 function deriveIdHint(params: {
   filePath: string;
   packageName?: string;
@@ -394,7 +380,7 @@ function addCandidate(params: {
     packageVersion: manifest?.version?.trim() || undefined,
     packageDescription: manifest?.description?.trim() || undefined,
     packageDir: params.packageDir,
-    packageManifest: getPackageManifestMetadata(manifest ?? undefined),
+    packageManifest: getExtensionPackageMetadata(manifest ?? undefined),
   });
 }
 
@@ -517,8 +503,8 @@ function discoverInDirectory(params: {
     }
 
     const rejectHardlinks = params.origin !== "bundled";
-    const manifest = readPackageManifest(fullPath, rejectHardlinks);
-    const extensionResolution = resolvePackageExtensionEntries(manifest ?? undefined);
+    const manifest = loadPackageManifest(fullPath, rejectHardlinks);
+    const extensionResolution = resolveExtensionEntryCandidates(manifest ?? undefined);
     const extensions = extensionResolution.status === "ok" ? extensionResolution.entries : [];
 
     if (extensions.length > 0) {
@@ -634,8 +620,8 @@ function discoverFromPath(params: {
 
   if (stat.isDirectory()) {
     const rejectHardlinks = params.origin !== "bundled";
-    const manifest = readPackageManifest(resolved, rejectHardlinks);
-    const extensionResolution = resolvePackageExtensionEntries(manifest ?? undefined);
+    const manifest = loadPackageManifest(resolved, rejectHardlinks);
+    const extensionResolution = resolveExtensionEntryCandidates(manifest ?? undefined);
     const extensions = extensionResolution.status === "ok" ? extensionResolution.entries : [];
 
     if (extensions.length > 0) {

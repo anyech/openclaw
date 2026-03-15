@@ -1,49 +1,32 @@
-import { createEmptyPluginRegistry, type PluginRegistry } from "./registry.js";
+import {
+  getActiveExtensionHostRegistry,
+  getActiveExtensionHostRegistryKey,
+  getActiveExtensionHostRegistryVersion,
+  requireActiveExtensionHostRegistry,
+  setActiveExtensionHostRegistry,
+  type ExtensionHostRegistry,
+} from "../extension-host/active-registry.js";
 
-const REGISTRY_STATE = Symbol.for("openclaw.pluginRegistryState");
+export type PluginRegistry = ExtensionHostRegistry;
 
-type RegistryState = {
-  registry: PluginRegistry | null;
-  key: string | null;
-  version: number;
-};
-
-const state: RegistryState = (() => {
-  const globalState = globalThis as typeof globalThis & {
-    [REGISTRY_STATE]?: RegistryState;
-  };
-  if (!globalState[REGISTRY_STATE]) {
-    globalState[REGISTRY_STATE] = {
-      registry: createEmptyPluginRegistry(),
-      key: null,
-      version: 0,
-    };
-  }
-  return globalState[REGISTRY_STATE];
-})();
-
+// Compatibility facade: legacy plugin runtime callers still import from this module,
+// but the active registry now lives under the extension-host boundary.
 export function setActivePluginRegistry(registry: PluginRegistry, cacheKey?: string) {
-  state.registry = registry;
-  state.key = cacheKey ?? null;
-  state.version += 1;
+  setActiveExtensionHostRegistry(registry, cacheKey);
 }
 
 export function getActivePluginRegistry(): PluginRegistry | null {
-  return state.registry;
+  return getActiveExtensionHostRegistry();
 }
 
 export function requireActivePluginRegistry(): PluginRegistry {
-  if (!state.registry) {
-    state.registry = createEmptyPluginRegistry();
-    state.version += 1;
-  }
-  return state.registry;
+  return requireActiveExtensionHostRegistry();
 }
 
 export function getActivePluginRegistryKey(): string | null {
-  return state.key;
+  return getActiveExtensionHostRegistryKey();
 }
 
 export function getActivePluginRegistryVersion(): number {
-  return state.version;
+  return getActiveExtensionHostRegistryVersion();
 }

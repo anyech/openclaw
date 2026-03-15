@@ -1,8 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
-import { MANIFEST_KEY } from "../../compat/legacy-names.js";
+import {
+  getExtensionPackageMetadata,
+  type OpenClawPackageManifest,
+  type PackageManifest,
+} from "../../extension-host/schema.js";
 import { discoverOpenClawPlugins } from "../../plugins/discovery.js";
-import type { OpenClawPackageManifest } from "../../plugins/manifest.js";
 import type { PluginOrigin } from "../../plugins/types.js";
 import { isRecord, resolveConfigDir, resolveUserPath } from "../../utils.js";
 import type { ChannelMeta } from "./types.js";
@@ -46,15 +49,9 @@ const ORIGIN_PRIORITY: Record<PluginOrigin, number> = {
   bundled: 3,
 };
 
-type ExternalCatalogEntry = {
-  name?: string;
-  version?: string;
-  description?: string;
-} & Partial<Record<ManifestKey, OpenClawPackageManifest>>;
+type ExternalCatalogEntry = PackageManifest;
 
 const ENV_CATALOG_PATHS = ["OPENCLAW_PLUGIN_CATALOG_PATHS", "OPENCLAW_MPM_CATALOG_PATHS"];
-
-type ManifestKey = typeof MANIFEST_KEY;
 
 function parseCatalogEntries(raw: unknown): ExternalCatalogEntry[] {
   if (Array.isArray(raw)) {
@@ -227,7 +224,7 @@ function buildCatalogEntry(candidate: {
 }
 
 function buildExternalCatalogEntry(entry: ExternalCatalogEntry): ChannelPluginCatalogEntry | null {
-  const manifest = entry[MANIFEST_KEY];
+  const manifest = getExtensionPackageMetadata(entry);
   return buildCatalogEntry({
     packageName: entry.name,
     packageManifest: manifest,

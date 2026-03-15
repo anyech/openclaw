@@ -172,6 +172,27 @@ export type PackageManifest = {
   description?: string;
 } & Partial<Record<ManifestKey, OpenClawPackageManifest>>;
 
+export function loadPackageManifest(dir: string, rejectHardlinks = true): PackageManifest | null {
+  const manifestPath = path.join(dir, "package.json");
+  const opened = openBoundaryFileSync({
+    absolutePath: manifestPath,
+    rootPath: dir,
+    boundaryLabel: "plugin package directory",
+    rejectHardlinks,
+  });
+  if (!opened.ok) {
+    return null;
+  }
+  try {
+    const raw = fs.readFileSync(opened.fd, "utf-8");
+    return JSON.parse(raw) as PackageManifest;
+  } catch {
+    return null;
+  } finally {
+    fs.closeSync(opened.fd);
+  }
+}
+
 export function getPackageManifestMetadata(
   manifest: PackageManifest | undefined,
 ): OpenClawPackageManifest | undefined {

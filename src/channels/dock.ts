@@ -8,6 +8,7 @@ import {
   resolveChannelGroupRequireMention,
   resolveChannelGroupToolsPolicy,
 } from "../config/group-policy.js";
+import { requireActiveExtensionHostRegistry } from "../extension-host/active-registry.js";
 import {
   formatAllowFromLowercase,
   formatNormalizedAllowFromEntries,
@@ -22,7 +23,6 @@ import {
   resolveWhatsAppConfigAllowFrom,
   resolveWhatsAppConfigDefaultTo,
 } from "../plugin-sdk/channel-config-helpers.js";
-import { requireActivePluginRegistry } from "../plugins/runtime.js";
 import { normalizeAccountId } from "../routing/session-key.js";
 import { normalizeE164 } from "../utils.js";
 import {
@@ -582,7 +582,7 @@ function buildDockFromPlugin(plugin: ChannelPlugin): ChannelDock {
 }
 
 function listPluginDockEntries(): Array<{ id: ChannelId; dock: ChannelDock; order?: number }> {
-  const registry = requireActivePluginRegistry();
+  const registry = requireActiveExtensionHostRegistry();
   const entries: Array<{ id: ChannelId; dock: ChannelDock; order?: number }> = [];
   const seen = new Set<string>();
   for (const entry of registry.channels) {
@@ -627,7 +627,7 @@ export function getChannelDock(id: ChannelId): ChannelDock | undefined {
   if (core) {
     return core;
   }
-  const registry = requireActivePluginRegistry();
+  const registry = requireActiveExtensionHostRegistry();
   const pluginEntry = registry.channels.find((entry) => entry.plugin.id === id);
   if (!pluginEntry) {
     return undefined;

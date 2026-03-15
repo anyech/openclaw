@@ -1,5 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  resolveExtensionEntryCandidates,
+  type PackageManifest as PluginPackageManifest,
+} from "../extension-host/schema.js";
 import { fileExists, readJsonFile, resolveArchiveKind } from "../infra/archive.js";
 import { writeFileFromPathWithinRoot } from "../infra/fs-safe.js";
 import { resolveExistingInstallPath, withExtractedArchiveRoot } from "../infra/install-flow.js";
@@ -158,7 +162,7 @@ function ensureOpenClawExtensions(params: { manifest: PackageManifest }):
       error: string;
       code: PluginInstallErrorCode;
     } {
-  const resolved = resolvePackageExtensionEntries(params.manifest);
+  const resolved = resolveExtensionEntryCandidates(params.manifest);
   if (resolved.status === "missing") {
     return {
       ok: false,
