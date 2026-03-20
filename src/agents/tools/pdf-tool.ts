@@ -131,7 +131,14 @@ export function resolvePdfModelConfigForTool(params: {
 // Build context for extraction fallback path
 // ---------------------------------------------------------------------------
 
-function buildPdfExtractionContext(prompt: string, extractions: PdfExtractedContent[]): Context {
+const CODEX_PDF_INSTRUCTIONS =
+  "Analyze the provided PDF content and answer the user's request accurately.";
+
+function buildPdfExtractionContext(
+  prompt: string,
+  extractions: PdfExtractedContent[],
+  model?: { api?: string },
+): Context {
   const content: Array<
     { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
   > = [];
@@ -151,7 +158,10 @@ function buildPdfExtractionContext(prompt: string, extractions: PdfExtractedCont
   // Add the user prompt
   content.push({ type: "text", text: prompt });
 
+  const systemPrompt = model?.api === "openai-codex-responses" ? CODEX_PDF_INSTRUCTIONS : undefined;
+
   return {
+    ...(systemPrompt ? { systemPrompt } : {}),
     messages: [{ role: "user", content, timestamp: Date.now() }],
   };
 }
@@ -256,7 +266,7 @@ async function runPdfPrompt(params: {
           text: e.text,
           images: [],
         }));
-        const context = buildPdfExtractionContext(params.prompt, textOnlyExtractions);
+        const context = buildPdfExtractionContext(params.prompt, textOnlyExtractions, model);
         const message = await complete(model, context, {
           apiKey,
           maxTokens: resolvePdfToolMaxTokens(model.maxTokens),
@@ -265,7 +275,7 @@ async function runPdfPrompt(params: {
         return { text, provider, model: modelId, native: false };
       }
 
-      const context = buildPdfExtractionContext(params.prompt, extractions);
+      const context = buildPdfExtractionContext(params.prompt, extractions, model);
       const message = await complete(model, context, {
         apiKey,
         maxTokens: resolvePdfToolMaxTokens(model.maxTokens),
