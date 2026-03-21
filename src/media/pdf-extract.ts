@@ -49,7 +49,13 @@ export async function extractPdfContent(params: {
 }): Promise<PdfExtractedContent> {
   const { buffer, maxPages, maxPixels, minTextChars, pageNumbers, onImageExtractionError } = params;
   const { getDocument } = await loadPdfJsModule();
-  const pdf = await getDocument({ data: new Uint8Array(buffer), disableWorker: true }).promise;
+  const standardFontDataUrl = new URL("../node_modules/pdfjs-dist/standard_fonts/", import.meta.url)
+    .pathname;
+  const pdf = await getDocument({
+    data: new Uint8Array(buffer),
+    disableWorker: true,
+    standardFontDataUrl,
+  }).promise;
 
   const effectivePages: number[] = pageNumbers
     ? pageNumbers.filter((p) => p >= 1 && p <= pdf.numPages).slice(0, maxPages)
