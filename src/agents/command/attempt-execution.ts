@@ -301,6 +301,85 @@ export async function persistAcpTurnTranscript(params: {
   return sessionEntry;
 }
 
+export async function persistCliTurnTranscript(params: {
+  body: string;
+  result: Awaited<ReturnType<typeof runCliAgent>>;
+  sessionId: string;
+  sessionKey?: string;
+  sessionFile: string;
+  sessionEntry: SessionEntry | undefined;
+  sessionStore?: Record<string, SessionEntry>;
+  storePath?: string;
+  sessionAgentId: string;
+  threadId?: string | number;
+  sessionCwd: string;
+  provider: string;
+  model: string;
+}): Promise<SessionEntry | undefined> {
+  const promptText = params.body;
+  const payloadText = params.result.payloads
+    ?.map((payload) => (typeof payload?.text === "string" ? payload.text : ""))
+    .filter((text): text is string => Boolean(text?.trim()))
+    .join("\n\n");
+  const replyText = normalizeReplyPayload({ text: payloadText ?? "" })?.text ?? "";
+
+  if (!promptText && !replyText) {
+    return params.sessionEntry;
+  }
+
+  const resolved = params.sessionKey
+    ? await resolveSessionTranscriptFile({
+        sessionId: params.sessionId,
+        sessionKey: params.sessionKey,
+        sessionEntry: params.sessionEntry,
+        sessionStore: params.sessionStore,
+        storePath: params.storePath,
+        agentId: params.sessionAgentId,
+        threadId: params.threadId,
+      })
+    : {
+        sessionFile: params.sessionFile,
+        sessionEntry: params.sessionEntry,
+      };
+
+  const hadSessionFile = await fs
+    .access(resolved.sessionFile)
+    .then(() => true)
+    .catch(() => false);
+  const sessionManager = SessionManager.open(resolved.sessionFile);
+  await prepareSessionManagerForRun({
+    sessionManager,
+    sessionFile: resolved.sessionFile,
+    hadSessionFile,
+    sessionId: params.sessionId,
+    cwd: params.sessionCwd,
+  });
+
+  if (promptText) {
+    sessionManager.appendMessage({
+      role: "user",
+      content: promptText,
+      timestamp: Date.now(),
+    });
+  }
+
+  if (replyText) {
+    sessionManager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: replyText }],
+      api: "openai-responses",
+      provider: params.provider,
+      model: params.result.meta.agentMeta?.model ?? params.model,
+      usage: ACP_TRANSCRIPT_USAGE,
+      stopReason: "stop",
+      timestamp: Date.now(),
+    });
+  }
+
+  emitSessionTranscriptUpdate(resolved.sessionFile);
+  return resolved.sessionEntry;
+}
+
 export function runAgentAttempt(params: {
   providerOverride: string;
   modelOverride: string;
@@ -346,6 +425,32 @@ export function runAgentAttempt(params: {
       : undefined;
   if (isCliProvider(params.providerOverride, params.cfg)) {
     const cliSessionBinding = getCliSessionBinding(params.sessionEntry, params.providerOverride);
+    const persistCliTranscript = async (result: Awaited<ReturnType<typeof runCliAgent>>) => {
+      try {
+        params.sessionEntry = await persistCliTurnTranscript({
+          body: effectivePrompt,
+          result,
+          sessionId: params.sessionId,
+          sessionKey: params.sessionKey,
+          sessionFile: params.sessionFile,
+          sessionEntry: params.sessionEntry,
+          sessionStore: params.sessionStore,
+          storePath: params.storePath,
+          sessionAgentId: params.sessionAgentId,
+          threadId: params.opts.threadId,
+          sessionCwd: params.workspaceDir,
+          provider: params.providerOverride,
+          model: params.modelOverride,
+        });
+      } catch (error) {
+        log.warn(
+          `CLI transcript persistence failed for ${params.sessionKey ?? params.sessionId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      return result;
+    };
     const runCliWithSession = (nextCliSessionId: string | undefined) =>
       runCliAgent({
         sessionId: params.sessionId,
@@ -371,65 +476,67 @@ export function runAgentAttempt(params: {
         imageOrder: params.isFallbackRetry ? undefined : params.opts.imageOrder,
         streamParams: params.opts.streamParams,
       });
-    return runCliWithSession(cliSessionBinding?.sessionId).catch(async (err) => {
-      if (
-        err instanceof FailoverError &&
-        err.reason === "session_expired" &&
-        cliSessionBinding?.sessionId &&
-        params.sessionKey &&
-        params.sessionStore &&
-        params.storePath
-      ) {
-        log.warn(
-          `CLI session expired, clearing from session store: provider=${sanitizeForLog(params.providerOverride)} sessionKey=${params.sessionKey}`,
-        );
+    return runCliWithSession(cliSessionBinding?.sessionId)
+      .catch(async (err) => {
+        if (
+          err instanceof FailoverError &&
+          err.reason === "session_expired" &&
+          cliSessionBinding?.sessionId &&
+          params.sessionKey &&
+          params.sessionStore &&
+          params.storePath
+        ) {
+          log.warn(
+            `CLI session expired, clearing from session store: provider=${sanitizeForLog(params.providerOverride)} sessionKey=${params.sessionKey}`,
+          );
 
-        const entry = params.sessionStore[params.sessionKey];
-        if (entry) {
-          const updatedEntry = { ...entry };
-          clearCliSession(updatedEntry, params.providerOverride);
-          updatedEntry.updatedAt = Date.now();
+          const entry = params.sessionStore[params.sessionKey];
+          if (entry) {
+            const updatedEntry = { ...entry };
+            clearCliSession(updatedEntry, params.providerOverride);
+            updatedEntry.updatedAt = Date.now();
 
-          await persistSessionEntry({
-            sessionStore: params.sessionStore,
-            sessionKey: params.sessionKey,
-            storePath: params.storePath,
-            entry: updatedEntry,
-          });
+            await persistSessionEntry({
+              sessionStore: params.sessionStore,
+              sessionKey: params.sessionKey,
+              storePath: params.storePath,
+              entry: updatedEntry,
+            });
 
-          params.sessionEntry = updatedEntry;
-        }
-
-        return runCliWithSession(undefined).then(async (result) => {
-          if (
-            result.meta.agentMeta?.cliSessionBinding?.sessionId &&
-            params.sessionKey &&
-            params.sessionStore &&
-            params.storePath
-          ) {
-            const entry = params.sessionStore[params.sessionKey];
-            if (entry) {
-              const updatedEntry = { ...entry };
-              setCliSessionBinding(
-                updatedEntry,
-                params.providerOverride,
-                result.meta.agentMeta.cliSessionBinding,
-              );
-              updatedEntry.updatedAt = Date.now();
-
-              await persistSessionEntry({
-                sessionStore: params.sessionStore,
-                sessionKey: params.sessionKey,
-                storePath: params.storePath,
-                entry: updatedEntry,
-              });
-            }
+            params.sessionEntry = updatedEntry;
           }
-          return result;
-        });
-      }
-      throw err;
-    });
+
+          return runCliWithSession(undefined).then(async (result) => {
+            if (
+              result.meta.agentMeta?.cliSessionBinding?.sessionId &&
+              params.sessionKey &&
+              params.sessionStore &&
+              params.storePath
+            ) {
+              const entry = params.sessionStore[params.sessionKey];
+              if (entry) {
+                const updatedEntry = { ...entry };
+                setCliSessionBinding(
+                  updatedEntry,
+                  params.providerOverride,
+                  result.meta.agentMeta.cliSessionBinding,
+                );
+                updatedEntry.updatedAt = Date.now();
+
+                await persistSessionEntry({
+                  sessionStore: params.sessionStore,
+                  sessionKey: params.sessionKey,
+                  storePath: params.storePath,
+                  entry: updatedEntry,
+                });
+              }
+            }
+            return result;
+          });
+        }
+        throw err;
+      })
+      .then(persistCliTranscript);
   }
 
   return runEmbeddedPiAgent({
