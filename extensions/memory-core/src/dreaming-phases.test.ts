@@ -8,7 +8,7 @@ import {
   resolveMemoryRemDreamingConfig,
 } from "openclaw/plugin-sdk/memory-core-host-status";
 import { describe, expect, it, vi } from "vitest";
-import { __testing } from "./dreaming-phases.js";
+import { __testing, previewRemDreaming } from "./dreaming-phases.js";
 import {
   rankShortTermPromotionCandidates,
   recordShortTermRecalls,
@@ -187,6 +187,17 @@ async function readCandidateSnippets(workspaceDir: string, nowIso: string): Prom
 }
 
 describe("memory-core dreaming phases", () => {
+  it("renders rem preview section headings as h2", () => {
+    const preview = previewRemDreaming({
+      entries: [],
+      limit: 10,
+      minPatternStrength: 0.75,
+    });
+
+    expect(preview.bodyLines[0]).toBe("## Reflections");
+    expect(preview.bodyLines).toContain("## Possible Lasting Truths");
+  });
+
   it("does not re-ingest managed light dreaming blocks from daily notes", async () => {
     const workspaceDir = await createDreamingWorkspace();
     await withDreamingTestClock(async () => {
