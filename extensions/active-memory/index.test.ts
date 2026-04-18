@@ -1068,6 +1068,60 @@ describe("active-memory plugin", () => {
     expect(infoLines.some((line: string) => line.includes(" cached "))).toBe(false);
   });
 
+  it("honors a configured timeoutMs of 90_000ms", async () => {
+    api.pluginConfig = {
+      agents: ["main"],
+      timeoutMs: 90_000,
+      logging: true,
+    };
+    plugin.register(api as unknown as OpenClawPluginApi);
+
+    await hooks.before_prompt_build(
+      { prompt: "what wings should i order? ninety second timeout", messages: [] },
+      {
+        agentId: "main",
+        trigger: "user",
+        sessionKey: "agent:main:ninety-second-timeout",
+        messageProvider: "webchat",
+      },
+    );
+
+    expect(runEmbeddedPiAgent).toHaveBeenCalled();
+    const firstCall = runEmbeddedPiAgent.mock.calls[0]?.[0] as { timeoutMs?: number } | undefined;
+    expect(firstCall?.timeoutMs).toBe(90_000);
+    const infoLines = vi
+      .mocked(api.logger.info)
+      .mock.calls.map((call: unknown[]) => String(call[0]));
+    expect(infoLines.some((line: string) => line.includes(" start timeoutMs=90000"))).toBe(true);
+  });
+
+  it("clamps configured timeoutMs values above 90_000ms down to 90_000ms", async () => {
+    api.pluginConfig = {
+      agents: ["main"],
+      timeoutMs: 120_000,
+      logging: true,
+    };
+    plugin.register(api as unknown as OpenClawPluginApi);
+
+    await hooks.before_prompt_build(
+      { prompt: "what wings should i order? above cap timeout", messages: [] },
+      {
+        agentId: "main",
+        trigger: "user",
+        sessionKey: "agent:main:above-cap-timeout",
+        messageProvider: "webchat",
+      },
+    );
+
+    expect(runEmbeddedPiAgent).toHaveBeenCalled();
+    const firstCall = runEmbeddedPiAgent.mock.calls[0]?.[0] as { timeoutMs?: number } | undefined;
+    expect(firstCall?.timeoutMs).toBe(90_000);
+    const infoLines = vi
+      .mocked(api.logger.info)
+      .mock.calls.map((call: unknown[]) => String(call[0]));
+    expect(infoLines.some((line: string) => line.includes(" start timeoutMs=90000"))).toBe(true);
+  });
+
   it("does not share cached recall results across session-id-only contexts", async () => {
     api.pluginConfig = {
       agents: ["main"],
