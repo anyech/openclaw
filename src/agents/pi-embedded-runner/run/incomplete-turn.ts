@@ -1,7 +1,12 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import { isSilentReplyText } from "../../../auto-reply/tokens.js";
 import type { EmbeddedPiExecutionContract } from "../../../config/types.agent-defaults.js";
-import { normalizeLowercaseStringOrEmpty } from "../../../shared/string-coerce.js";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "../../../shared/string-coerce.js";
 import { isStrictAgenticSupportedProviderModel } from "../../execution-contract.js";
+import { extractToolResultText } from "../../pi-embedded-subscribe.tools.js";
 import { isLikelyMutatingToolName } from "../../tool-mutation.js";
 import { assessLastAssistantMessage } from "../thinking.js";
 import type { EmbeddedRunLivenessState } from "../types.js";
@@ -38,6 +43,15 @@ type PlanningOnlyAttempt = Pick<
   | "itemLifecycle"
   | "replayMetadata"
   | "toolMetas"
+>;
+
+type SilentToolResultAttempt = Pick<
+  EmbeddedRunAttemptResult,
+  | "clientToolCall"
+  | "yieldDetected"
+  | "didSendDeterministicApprovalPrompt"
+  | "lastToolError"
+  | "messagesSnapshot"
 >;
 
 type RunLivenessAttempt = Pick<
@@ -197,6 +211,55 @@ export function resolveIncompleteTurnPayloadText(params: {
   return params.attempt.replayMetadata.hadPotentialSideEffects
     ? "⚠️ Agent couldn't generate a response. Note: some tool actions may have already been executed — please verify before retrying."
     : "⚠️ Agent couldn't generate a response. Please try again.";
+}
+
+export function resolveSilentToolResultReplyPayload(params: {
+  isCronTrigger: boolean;
+  payloadCount: number;
+  aborted: boolean;
+  timedOut: boolean;
+  attempt: SilentToolResultAttempt;
+}): { text: "NO_REPLY" } | null {
+  if (
+    !params.isCronTrigger ||
+    params.payloadCount !== 0 ||
+    params.aborted ||
+    params.timedOut ||
+    params.attempt.clientToolCall ||
+    params.attempt.yieldDetected ||
+    params.attempt.didSendDeterministicApprovalPrompt ||
+    params.attempt.lastToolError
+  ) {
+    return null;
+  }
+
+  const messages = params.attempt.messagesSnapshot;
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return null;
+  }
+
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as AgentMessage & {
+      isError?: boolean;
+      details?: { aggregated?: unknown };
+    };
+    const role = normalizeLowercaseStringOrEmpty(message?.role);
+    if (role !== "toolresult" && role !== "tool_result" && role !== "tool") {
+      continue;
+    }
+    if (message?.isError === true) {
+      return null;
+    }
+    const aggregated =
+      typeof message?.details?.aggregated === "string" ? message.details.aggregated : undefined;
+    const text = normalizeOptionalString(extractToolResultText(message) ?? aggregated);
+    if (!text || !isSilentReplyText(text, "NO_REPLY")) {
+      return null;
+    }
+    return { text: "NO_REPLY" };
+  }
+
+  return null;
 }
 
 export function resolveReplayInvalidFlag(params: {
