@@ -1,10 +1,18 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { __testing, deliverSubagentAnnouncement } from "./subagent-announce-delivery.js";
+import {
+  __testing,
+  deliverSubagentAnnouncement,
+  isInternalAnnounceRequesterSession,
+} from "./subagent-announce-delivery.js";
 import { callGateway as runtimeCallGateway } from "./subagent-announce-delivery.runtime.js";
 import { resolveAnnounceOrigin } from "./subagent-announce-origin.js";
 
 afterEach(() => {
   __testing.setDepsForTest();
+  vi.unstubAllEnvs();
 });
 
 const slackThreadOrigin = {
@@ -53,6 +61,48 @@ async function deliverSlackThreadAnnouncement(params: {
     directIdempotencyKey: params.directIdempotencyKey,
   });
 }
+
+describe("isInternalAnnounceRequesterSession", () => {
+  it("treats explicit requester sessions with persisted spawnDepth as internal", () => {
+    const stateDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "openclaw-explicit-requester-session-state-"),
+    );
+    const storePath = path.join(stateDir, "agents", "main", "sessions", "sessions.json");
+    const key = "agent:main:explicit:new-skills-zoom-panel-20260423a:acct:default";
+    fs.mkdirSync(path.dirname(storePath), { recursive: true });
+    fs.writeFileSync(
+      storePath,
+      JSON.stringify(
+        {
+          [key]: {
+            sessionId: "new-skills-zoom-panel-20260423a",
+            spawnDepth: 1,
+          },
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+
+    expect(isInternalAnnounceRequesterSession(key)).toBe(true);
+  });
+
+  it("treats explicit requester sessions without persisted metadata as external", () => {
+    const stateDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "openclaw-explicit-requester-session-empty-state-"),
+    );
+    const key = "agent:main:explicit:new-skills-zoom-panel-20260423a:acct:default";
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+
+    expect(isInternalAnnounceRequesterSession(key)).toBe(false);
+  });
+
+  it("still treats cron requester sessions as internal", () => {
+    expect(isInternalAnnounceRequesterSession("agent:main:cron:nightly-sync")).toBe(true);
+  });
+});
 
 describe("resolveAnnounceOrigin threaded route targets", () => {
   it("preserves stored thread ids when requester origin omits one for the same chat", () => {

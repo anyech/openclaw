@@ -1,9 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { resolveAgentTimeoutMs, resolveAgentTimeoutSeconds } from "./timeout.js";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("getSubagentDepthFromSessionStore", () => {
   it("uses spawnDepth from the session store when available", () => {
@@ -111,6 +115,78 @@ describe("getSubagentDepthFromSessionStore", () => {
       },
     });
     expect(depth).toBe(1);
+  });
+
+  it("falls back to session-key segment counting when the default store file is absent", () => {
+    const stateDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "openclaw-subagent-depth-missing-default-store-"),
+    );
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+
+    const depth = getSubagentDepthFromSessionStore("agent:main:subagent:orphan");
+
+    expect(depth).toBe(1);
+  });
+
+  it("uses the default on-disk session store for explicit agent keys when cfg is omitted", () => {
+    const stateDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "openclaw-subagent-depth-default-state-"),
+    );
+    const storePath = path.join(stateDir, "agents", "main", "sessions", "sessions.json");
+    const key = "agent:main:explicit:new-skills-zoom-panel-20260423a:acct:default";
+    fs.mkdirSync(path.dirname(storePath), { recursive: true });
+    fs.writeFileSync(
+      storePath,
+      JSON.stringify(
+        {
+          [key]: {
+            sessionId: "new-skills-zoom-panel-20260423a",
+            spawnDepth: 1,
+          },
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+
+    const depth = getSubagentDepthFromSessionStore(key);
+
+    expect(depth).toBe(1);
+  });
+
+  it("derives spawnedBy ancestry from the default on-disk session store when cfg is omitted", () => {
+    const stateDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "openclaw-subagent-depth-default-ancestry-"),
+    );
+    const storePath = path.join(stateDir, "agents", "main", "sessions", "sessions.json");
+    const parentKey = "agent:main:subagent:panel-parent";
+    const key = "agent:main:explicit:new-skills-zoom-panel-20260423a:acct:default";
+    fs.mkdirSync(path.dirname(storePath), { recursive: true });
+    fs.writeFileSync(
+      storePath,
+      JSON.stringify(
+        {
+          [parentKey]: {
+            sessionId: "panel-parent",
+            spawnedBy: "agent:main:main",
+          },
+          [key]: {
+            sessionId: "new-skills-zoom-panel-20260423a",
+            spawnedBy: parentKey,
+          },
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+
+    const depth = getSubagentDepthFromSessionStore(key);
+
+    expect(depth).toBe(2);
   });
 });
 
