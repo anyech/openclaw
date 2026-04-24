@@ -389,14 +389,16 @@ describe("web session", () => {
       onError,
     );
 
-    await flushCredsUpdate();
-
-    expect(inFlightA).toBe(1);
-    expect(inFlightB).toBe(1);
-
-    (releaseA as (() => void) | null)?.();
-    (releaseB as (() => void) | null)?.();
-    await Promise.all([waitForCredsSaveQueue(authDirA), waitForCredsSaveQueue(authDirB)]);
+    try {
+      await vi.waitFor(() => {
+        expect(inFlightA).toBe(1);
+        expect(inFlightB).toBe(1);
+      });
+    } finally {
+      releaseA?.();
+      releaseB?.();
+      await Promise.all([waitForCredsSaveQueue(authDirA), waitForCredsSaveQueue(authDirB)]);
+    }
 
     expect(inFlightA).toBe(0);
     expect(inFlightB).toBe(0);
