@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 type CanvasLike = {
   toBuffer(type: "image/png"): Buffer;
 };
@@ -31,7 +33,11 @@ type PdfDocument = {
 };
 
 type PdfJsModule = {
-  getDocument(params: { data: Uint8Array; disableWorker?: boolean }): {
+  getDocument(params: {
+    data: Uint8Array;
+    disableWorker?: boolean;
+    standardFontDataUrl?: string;
+  }): {
     promise: Promise<PdfDocument>;
   };
 };
@@ -87,8 +93,14 @@ export async function extractPdfContent(params: {
 }): Promise<PdfExtractedContent> {
   const { buffer, maxPages, maxPixels, minTextChars, pageNumbers, onImageExtractionError } = params;
   const pdfJsModule = await loadPdfJsModule();
-  const pdf = await pdfJsModule.getDocument({ data: new Uint8Array(buffer), disableWorker: true })
-    .promise;
+  const standardFontDataUrl = fileURLToPath(
+    new URL("../../node_modules/pdfjs-dist/standard_fonts/", import.meta.url),
+  );
+  const pdf = await pdfJsModule.getDocument({
+    data: new Uint8Array(buffer),
+    disableWorker: true,
+    standardFontDataUrl,
+  }).promise;
 
   const effectivePages: number[] = pageNumbers
     ? pageNumbers.filter((p) => p >= 1 && p <= pdf.numPages).slice(0, maxPages)
