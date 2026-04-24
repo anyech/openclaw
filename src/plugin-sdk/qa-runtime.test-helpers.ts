@@ -8,6 +8,10 @@ type QaRuntimeModule = {
 };
 
 type SurfaceLoaderMock = ReturnType<typeof vi.fn>;
+type QaRuntimeSurface = {
+  defaultQaRuntimeModelForMode: unknown;
+  startQaLiveLaneGateway: unknown;
+};
 
 export function cleanupTempDirs(tempDirs: string[]): void {
   for (const dir of tempDirs.splice(0)) {
@@ -33,7 +37,7 @@ export function makePrivateQaSourceRoot(tempDirs: string[], prefix: string): str
   return sourceRoot;
 }
 
-export function makeQaRuntimeSurface() {
+export function makeQaRuntimeSurface(): QaRuntimeSurface {
   return {
     defaultQaRuntimeModelForMode: vi.fn(),
     startQaLiveLaneGateway: vi.fn(),

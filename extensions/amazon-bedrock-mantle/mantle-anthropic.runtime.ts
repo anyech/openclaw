@@ -5,6 +5,9 @@ import { streamAnthropic } from "@mariozechner/pi-ai/anthropic";
 
 const MANTLE_ANTHROPIC_BETA = "fine-grained-tool-streaming-2025-05-14";
 type AnthropicOptions = ConstructorParameters<typeof Anthropic>[0];
+type MantleAnthropicClient = NonNullable<
+  NonNullable<Parameters<typeof streamAnthropic>[2]>["client"]
+>;
 
 export function resolveMantleAnthropicBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.replace(/\/+$/, "");
@@ -75,12 +78,15 @@ function adjustMaxTokensForThinking(
 }
 
 export function createMantleAnthropicStreamFn(deps?: {
-  createClient?: (options: AnthropicOptions) => Anthropic;
+  createClient?: (options: AnthropicOptions) => MantleAnthropicClient;
   stream?: typeof streamAnthropic;
 }): StreamFn {
   return (model, context, options) => {
     const apiKey = options?.apiKey ?? "";
-    const createClient = deps?.createClient ?? ((clientOptions) => new Anthropic(clientOptions));
+    const createClient =
+      deps?.createClient ??
+      ((clientOptions): MantleAnthropicClient =>
+        new Anthropic(clientOptions) as unknown as MantleAnthropicClient);
     const stream = deps?.stream ?? streamAnthropic;
     const client = createClient({
       apiKey: null,
