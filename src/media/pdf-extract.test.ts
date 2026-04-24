@@ -1,0 +1,68 @@
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const require = createRequire(import.meta.url);
+const getDocumentMock = vi.fn();
+const createCanvasMock = vi.fn(() => ({
+  toBuffer: vi.fn(() => Buffer.from("png")),
+}));
+
+vi.mock("pdfjs-dist/legacy/build/pdf.mjs", () => ({
+  getDocument: getDocumentMock,
+}));
+
+vi.mock("@napi-rs/canvas", () => ({
+  createCanvas: createCanvasMock,
+}));
+
+import { extractPdfContent } from "./pdf-extract.js";
+
+describe("extractPdfContent standard font wiring", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    const renderMock = vi.fn(() => ({ promise: Promise.resolve() }));
+    const getViewportMock = vi.fn(({ scale }: { scale: number }) => ({
+      width: 200 * scale,
+      height: 100 * scale,
+    }));
+    const getTextContentMock = vi.fn(async () => ({ items: [] }));
+    const getPageMock = vi.fn(async () => ({
+      getTextContent: getTextContentMock,
+      getViewport: getViewportMock,
+      render: renderMock,
+    }));
+
+    getDocumentMock.mockReturnValue({
+      promise: Promise.resolve({
+        numPages: 1,
+        getPage: getPageMock,
+      }),
+    });
+  });
+
+  it("passes standardFontDataUrl to pdfjs getDocument from the pdfjs package root", async () => {
+    await extractPdfContent({
+      buffer: Buffer.from("fake pdf"),
+      maxPages: 1,
+      maxPixels: 4_000_000,
+      minTextChars: 200,
+    });
+
+    expect(getDocumentMock).toHaveBeenCalledTimes(1);
+    const [params] = getDocumentMock.mock.calls[0] ?? [];
+    expect(params).toMatchObject({
+      disableWorker: true,
+    });
+    expect(typeof params.standardFontDataUrl).toBe("string");
+
+    const expectedStandardFontDataUrl =
+      path.join(path.dirname(require.resolve("pdfjs-dist/package.json")), "standard_fonts") +
+      path.sep;
+    expect(params.standardFontDataUrl).toBe(expectedStandardFontDataUrl);
+    expect(existsSync(params.standardFontDataUrl)).toBe(true);
+    expect(createCanvasMock).toHaveBeenCalledTimes(1);
+  });
+});
