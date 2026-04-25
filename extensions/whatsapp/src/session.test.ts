@@ -357,14 +357,25 @@ describe("web session", () => {
   it("lets different authDir queues flush independently", async () => {
     let inFlightA = 0;
     let inFlightB = 0;
-    let releaseA: (() => void) | null = null;
-    let releaseB: (() => void) | null = null;
-    const gateA = new Promise<void>((resolve) => {
-      releaseA = resolve;
-    });
-    const gateB = new Promise<void>((resolve) => {
-      releaseB = resolve;
-    });
+
+    const createGate = () => {
+      let resolveGate: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        resolveGate = () => resolve();
+      });
+      return {
+        gate,
+        release() {
+          const fn = resolveGate;
+          if (fn) {
+            fn();
+          }
+        },
+      };
+    };
+
+    const gateA = createGate();
+    const gateB = createGate();
 
     const authDirA = createTempAuthDir("openclaw-wa-a");
     const authDirB = createTempAuthDir("openclaw-wa-b");
@@ -374,7 +385,7 @@ describe("web session", () => {
       authDirA,
       async () => {
         inFlightA += 1;
-        await gateA;
+        await gateA.gate;
         inFlightA -= 1;
       },
       onError,
@@ -383,7 +394,7 @@ describe("web session", () => {
       authDirB,
       async () => {
         inFlightB += 1;
-        await gateB;
+        await gateB.gate;
         inFlightB -= 1;
       },
       onError,
@@ -395,8 +406,8 @@ describe("web session", () => {
         expect(inFlightB).toBe(1);
       });
     } finally {
-      releaseA?.();
-      releaseB?.();
+      gateA.release();
+      gateB.release();
       await Promise.all([waitForCredsSaveQueue(authDirA), waitForCredsSaveQueue(authDirB)]);
     }
 
