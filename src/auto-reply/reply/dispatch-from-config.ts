@@ -1600,10 +1600,17 @@ export async function dispatchReplyFromConfig(
     let routedFinalCount = 0;
     let attemptedFinalDelivery = false;
     let finalDeliveryFailed = false;
-    const shouldDeliverDespiteSourceReplySuppression = (reply: ReplyPayload) =>
-      suppressAutomaticSourceDelivery &&
-      !sendPolicyDenied &&
-      getReplyPayloadMetadata(reply)?.deliverDespiteSourceReplySuppression === true;
+    const shouldDeliverDespiteSourceReplySuppression = (reply: ReplyPayload) => {
+      const metadata = getReplyPayloadMetadata(reply);
+      return (
+        suppressAutomaticSourceDelivery &&
+        !sendPolicyDenied &&
+        // Runtime failure notices and missed message-tool-only final replies are distinct
+        // safety nets, but both use the normal final delivery path after policy checks.
+        (metadata?.deliverDespiteSourceReplySuppression === true ||
+          metadata?.messageToolOnlyFinalFallback === true)
+      );
+    };
     for (const reply of replies) {
       // Suppress reasoning payloads from channel delivery — channels using this
       // generic dispatch path do not have a dedicated reasoning lane.
