@@ -63,7 +63,7 @@ jobs:
       missing_trusted_publisher_matrix: ${{ steps.plan.outputs.missing_trusted_publisher_matrix }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
           ref: ${{ github.ref }}
@@ -275,7 +275,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -315,7 +315,7 @@ jobs:
         plugin: ${{ fromJson(needs.preview_plugins_clawhub.outputs.matrix) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
           ref: ${{ github.ref }}
@@ -352,6 +352,11 @@ jobs:
           chmod +x "${RUNNER_TEMP}/clawhub"
           echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
 
+      - name: Enforce OIDC-only ClawHub publish auth
+        run: |
+          set -euo pipefail
+          echo "ClawHub publishes use GitHub OIDC trusted publishing; long-lived token fallback is intentionally disabled."
+
       - name: Pack ClawHub package artifact
         env:
           CLAWHUB_REGISTRY: ${{ env.CLAWHUB_REGISTRY }}
@@ -364,7 +369,7 @@ jobs:
         run: bash scripts/plugin-clawhub-publish.sh --pack "${PACKAGE_DIR}"
 
       - name: Upload ClawHub package artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.plugin.artifactName }}
           path: ${{ runner.temp }}/clawhub-package-artifact/*.tgz
