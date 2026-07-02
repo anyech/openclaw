@@ -16,8 +16,7 @@ export type OpenAIReasoningEffort =
   | "medium"
   | "high"
   | "xhigh"
-  | "max"
-  | "ultra";
+  | "max";
 
 export type OpenAIApiReasoningEffort = OpenAIReasoningEffort | (string & {});
 
@@ -33,6 +32,7 @@ type OpenAIReasoningModel = {
 const GPT_5_REASONING_EFFORTS = ["minimal", "low", "medium", "high"] as const;
 const GPT_51_REASONING_EFFORTS = ["none", "low", "medium", "high"] as const;
 const GPT_52_REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh"] as const;
+const GPT_56_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 const GPT_CODEX_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 const GPT_PRO_REASONING_EFFORTS = ["medium", "high", "xhigh"] as const;
 const GPT_5_PRO_REASONING_EFFORTS = ["high"] as const;
@@ -103,6 +103,9 @@ export function resolveOpenAISupportedReasoningEfforts(
   }
 
   const id = normalizeModelId(typeof model.id === "string" ? model.id : undefined);
+  if (/^gpt-5\.6(?:-|$)/u.test(id)) {
+    return GPT_56_REASONING_EFFORTS;
+  }
   if (id === "gpt-5.1-codex-mini") {
     return GPT_51_CODEX_MINI_REASONING_EFFORTS;
   }
@@ -162,14 +165,22 @@ export function resolveOpenAIReasoningEffortForModel(params: {
   if ((requested === "minimal" || requested === "low") && supported.includes("medium")) {
     return "medium";
   }
-  if (requested === "ultra" && supported.includes("max")) {
-    return "max";
+  if (requested === "ultra" || normalized === "ultra") {
+    if (supported.includes("max")) {
+      return "max";
+    }
+    if (supported.includes("xhigh")) {
+      return "xhigh";
+    }
+    if (supported.includes("high")) {
+      return "high";
+    }
   }
-  if ((requested === "ultra" || requested === "max") && supported.includes("xhigh")) {
-    return "xhigh";
-  }
-  if (["ultra", "max", "xhigh"].includes(requested) && supported.includes("high")) {
+  if (requested === "xhigh" && supported.includes("high")) {
     return "high";
+  }
+  if (requested === "max" && supported.includes("xhigh")) {
+    return "xhigh";
   }
   return supported.find((effort) => effort !== "none");
 }

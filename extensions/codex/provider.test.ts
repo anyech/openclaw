@@ -88,7 +88,7 @@ describe("codex provider", () => {
           displayName: "gpt-5.4",
           hidden: false,
           inputModalities: ["text", "image"],
-          supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+          supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"],
         },
         {
           id: "hidden-model",
@@ -121,7 +121,20 @@ describe("codex provider", () => {
       name: "gpt-5.4",
       reasoning: true,
       input: ["text", "image"],
-      compat: { supportsReasoningEffort: true, supportsUsageInStreaming: true },
+      thinkingLevelMap: {
+        minimal: null,
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: "xhigh",
+        max: null,
+        ultra: "ultra",
+      },
+      compat: {
+        supportsReasoningEffort: true,
+        supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"],
+        supportsUsageInStreaming: true,
+      },
     });
   });
 
@@ -343,7 +356,9 @@ describe("codex provider", () => {
     expectRecordFields(model, {
       id: "o4-mini",
       reasoning: true,
-      compat: { supportsReasoningEffort: true, supportsUsageInStreaming: true },
+      compat: {
+        supportsUsageInStreaming: true,
+      },
     });
     expect(
       provider
@@ -352,43 +367,61 @@ describe("codex provider", () => {
     ).toBe(true);
   });
 
-  it("exposes ultra only when the native Codex catalog advertises it", () => {
+  it("keeps undiscovered GPT-5.6 models on family reasoning rules", () => {
     const provider = buildCodexProvider();
-    const profile = provider.resolveThinkingProfile?.({
+    const model = provider.resolveDynamicModel?.({
       provider: "codex",
-      modelId: "gpt-5.6-sol",
-      compat: {
-        supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"],
-      },
+      modelId: "gpt-5.6-luna",
+      modelRegistry: { find: () => null },
     } as never);
 
-    expect(profile?.levels.map((level) => level.id)).toEqual([
-      "off",
-      "minimal",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "ultra",
-    ]);
+    expectRecordFields(model, {
+      id: "gpt-5.6-luna",
+      reasoning: true,
+      compat: { supportsUsageInStreaming: true },
+    });
+    expect(
+      provider
+        .resolveThinkingProfile?.({ provider: "codex", modelId: "gpt-5.6-luna" } as never)
+        ?.levels.map((level) => level.id),
+    ).toContain("max");
   });
 
-  it("does not expose ultra when native Codex discovery omits it", () => {
+  it("exposes max for the GPT-5.6 series", () => {
     const provider = buildCodexProvider();
-    const profile = provider.resolveThinkingProfile?.({
-      provider: "codex",
-      modelId: "gpt-5.5",
-      compat: { supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
-    } as never);
+    const levels = (modelId: string) =>
+      provider
+        .resolveThinkingProfile?.({ provider: "codex", modelId } as never)
+        ?.levels.map((level) => level.id);
 
-    expect(profile?.levels.map((level) => level.id)).toEqual([
-      "off",
-      "minimal",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-    ]);
+    expect(levels("gpt-5.6")).toContain("max");
+    expect(levels("gpt-5.6-sol-oai")).toContain("max");
+    expect(levels("gpt-5.6-terra")).toContain("max");
+    expect(levels("gpt-5.6-luna")).toContain("max");
+  });
+
+  it("uses app-server reasoning metadata as the authoritative thinking profile", () => {
+    const provider = buildCodexProvider();
+
+    expect(
+      provider
+        .resolveThinkingProfile?.({
+          provider: "codex",
+          modelId: "gpt-5.4-pro",
+          compat: { supportedReasoningEfforts: ["medium", "high", "xhigh"] },
+        } as never)
+        ?.levels.map((level) => level.id),
+    ).toEqual(["off", "medium", "high", "xhigh"]);
+
+    expect(
+      provider
+        .resolveThinkingProfile?.({
+          provider: "codex",
+          modelId: "gpt-5.6-sol",
+          compat: { supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"] },
+        } as never)
+        ?.levels.map((level) => level.id),
+    ).toEqual(["off", "low", "medium", "high", "xhigh", "ultra"]);
   });
 
   it("declares synthetic auth because the harness owns Codex credentials", () => {

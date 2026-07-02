@@ -16,6 +16,7 @@ export const CODEX_APP_SERVER_AUTH_MARKER = "codex-app-server";
 
 const DEFAULT_CONTEXT_WINDOW = 272_000;
 const DEFAULT_MAX_TOKENS = 128_000;
+const CODEX_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 
 /** Offline fallback catalog used when live app-server discovery is unavailable. */
 export const FALLBACK_CODEX_MODELS = [
@@ -46,23 +47,46 @@ export function buildCodexModelDefinition(model: {
   model: string;
   displayName?: string;
   inputModalities: string[];
-  supportedReasoningEfforts: string[];
+  supportedReasoningEfforts?: string[];
 }): ModelDefinitionConfig {
   const id = model.id.trim() || model.model.trim();
+  const supportedReasoningEfforts = model.supportedReasoningEfforts;
+  const thinkingLevelMap = buildCodexThinkingLevelMap(supportedReasoningEfforts);
   return {
     id,
     name: model.displayName?.trim() || id,
     api: "openai-chatgpt-responses",
-    reasoning: model.supportedReasoningEfforts.length > 0 || shouldDefaultToReasoningModel(id),
+    reasoning:
+      supportedReasoningEfforts !== undefined
+        ? supportedReasoningEfforts.length > 0
+        : shouldDefaultToReasoningModel(id),
     input: model.inputModalities.includes("image") ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: DEFAULT_CONTEXT_WINDOW,
     maxTokens: DEFAULT_MAX_TOKENS,
+    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     compat: {
-      supportsReasoningEffort: model.supportedReasoningEfforts.length > 0,
+      ...(supportedReasoningEfforts !== undefined
+        ? { supportsReasoningEffort: supportedReasoningEfforts.length > 0 }
+        : {}),
+      ...(supportedReasoningEfforts && supportedReasoningEfforts.length > 0
+        ? { supportedReasoningEfforts: [...supportedReasoningEfforts] }
+        : {}),
       supportsUsageInStreaming: true,
     },
   };
+}
+
+function buildCodexThinkingLevelMap(
+  supportedReasoningEfforts: string[] | undefined,
+): Record<string, string | null> | undefined {
+  if (supportedReasoningEfforts === undefined || supportedReasoningEfforts.length === 0) {
+    return undefined;
+  }
+  const supported = new Set(supportedReasoningEfforts.map((effort) => effort.trim().toLowerCase()));
+  return Object.fromEntries(
+    CODEX_THINKING_LEVELS.map((level) => [level, supported.has(level) ? level : null]),
+  );
 }
 
 /** Builds the synthetic Codex provider config for a model list. */

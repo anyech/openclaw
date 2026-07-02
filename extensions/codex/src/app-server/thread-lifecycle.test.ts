@@ -929,21 +929,6 @@ describe("Codex app-server turn params", () => {
     });
   });
 
-  it("passes ultra unchanged to the native Codex app-server runtime", () => {
-    const params = createAttemptParams({ provider: "codex" });
-    params.modelId = "gpt-5.6-sol";
-    params.thinkLevel = "ultra";
-
-    const turnParams = buildTurnStartParams(params, {
-      threadId: "thread-ultra",
-      cwd: "/tmp/workspace",
-      appServer: createAppServerOptions() as never,
-    });
-
-    expect(turnParams.effort).toBe("ultra");
-    expect(turnParams.collaborationMode?.settings.reasoning_effort).toBe("ultra");
-  });
-
   it("uses turn-scoped collaboration instructions for heartbeat Codex turns", () => {
     const params = createAttemptParams({ provider: "codex" });
     params.modelId = "gpt-5.4-codex";
@@ -967,6 +952,25 @@ describe("Codex app-server turn params", () => {
       "If `heartbeat_respond` is not already available and `tool_search` is available",
     );
     expect(heartbeatCollaborationMode.settings.developer_instructions).toContain(
+      "HEARTBEAT.md exists at /tmp/workspace/HEARTBEAT.md.",
+    );
+
+    params.bootstrapContextRunKind = "commitment-only";
+    const commitmentCollaborationMode = buildTurnCollaborationMode(params, {
+      turnScopedDeveloperInstructions: "Turn-only workspace instructions.",
+      heartbeatCollaborationInstructions:
+        "HEARTBEAT.md exists at /tmp/workspace/HEARTBEAT.md. Read it before proceeding.",
+    });
+    expect(commitmentCollaborationMode.settings.developer_instructions).toContain(
+      "# Collaboration Mode: Default",
+    );
+    expect(commitmentCollaborationMode.settings.developer_instructions).toContain(
+      "Turn-only workspace instructions.",
+    );
+    expect(commitmentCollaborationMode.settings.developer_instructions).not.toContain(
+      "This is an OpenClaw heartbeat turn",
+    );
+    expect(commitmentCollaborationMode.settings.developer_instructions).not.toContain(
       "HEARTBEAT.md exists at /tmp/workspace/HEARTBEAT.md.",
     );
 
@@ -1349,14 +1353,32 @@ describe("Codex app-server thread lifecycle timing", () => {
 
 describe("resolveReasoningEffort (#71946)", () => {
   describe("modern Codex models (none/low/medium/high/xhigh enum)", () => {
-    it.each(["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"] as const)(
+    it.each([
+      "gpt-5.6",
+      "gpt-5.6-sol-oai",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex-spark",
+    ] as const)(
       "translates 'minimal' -> 'low' for %s so the first request is accepted",
       (modelId) => {
         expect(resolveReasoningEffort("minimal", modelId)).toBe("low");
       },
     );
 
-    it.each(["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"] as const)(
+    it.each([
+      "gpt-5.6",
+      "gpt-5.6-sol-oai",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex-spark",
+    ] as const)(
       "passes 'low' / 'medium' / 'high' / 'xhigh' through unchanged for %s",
       (modelId) => {
         expect(resolveReasoningEffort("low", modelId)).toBe("low");
@@ -1369,6 +1391,31 @@ describe("resolveReasoningEffort (#71946)", () => {
     it("normalizes case-variant model ids", () => {
       expect(resolveReasoningEffort("minimal", "GPT-5.5")).toBe("low");
       expect(resolveReasoningEffort("minimal", " gpt-5.4-mini ")).toBe("low");
+    });
+
+    it("honors stricter app-server reasoning metadata", () => {
+      const supported = ["medium", "high", "xhigh"];
+
+      expect(resolveReasoningEffort("minimal", "gpt-5.4-pro", supported)).toBe("medium");
+      expect(resolveReasoningEffort("low", "gpt-5.4-pro", supported)).toBe("medium");
+      expect(resolveReasoningEffort("medium", "gpt-5.4-pro", supported)).toBe("medium");
+      expect(resolveReasoningEffort("max", "gpt-5.4-pro", supported)).toBe("xhigh");
+    });
+
+    it("preserves ultra only when app-server reasoning metadata advertises it", () => {
+      expect(
+        resolveReasoningEffort("ultra", "gpt-5.6-sol", [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra",
+        ]),
+      ).toBe("ultra");
+      expect(
+        resolveReasoningEffort("ultra", "gpt-5.6-sol", ["low", "medium", "high", "xhigh", "max"]),
+      ).toBe("max");
     });
   });
 
@@ -1397,9 +1444,13 @@ describe("resolveReasoningEffort (#71946)", () => {
       expect(resolveReasoningEffort("adaptive", "gpt-4o")).toBeNull();
     });
 
-    it("passes native Codex ultra through without forwarding generic max", () => {
-      expect(resolveReasoningEffort("max", "gpt-5.6-sol")).toBeNull();
-      expect(resolveReasoningEffort("ultra", "gpt-5.6-sol")).toBe("ultra");
+    it("passes max for the GPT-5.6 series", () => {
+      expect(resolveReasoningEffort("max", "gpt-5.6")).toBe("max");
+      expect(resolveReasoningEffort("max", "gpt-5.6-sol-oai")).toBe("max");
+      expect(resolveReasoningEffort("max", "gpt-5.6-terra")).toBe("max");
+      expect(resolveReasoningEffort("max", "gpt-5.6-luna")).toBe("max");
+      expect(resolveReasoningEffort("max", "gpt-5.5")).toBeNull();
+      expect(resolveReasoningEffort("max", "gpt-4o")).toBeNull();
     });
   });
 });

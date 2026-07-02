@@ -24,6 +24,7 @@ const EXTENDED_THINKING_LEVELS: ModelThinkingLevel[] = [
   "high",
   "xhigh",
   "max",
+  "ultra",
 ];
 
 function resolveThinkingLevelMap<TApi extends Api>(model: Model<TApi>) {
@@ -48,7 +49,7 @@ export function getSupportedThinkingLevels<TApi extends Api>(
     if (mapped === null) {
       return false;
     }
-    if (level === "xhigh" || level === "max") {
+    if (level === "xhigh" || level === "max" || level === "ultra") {
       return mapped !== undefined;
     }
     return true;
@@ -73,7 +74,10 @@ export function clampThinkingLevel<TApi extends Api>(
   // Explicit provider opt-outs are hard caps. Downgrade them before considering
   // stronger levels so unsupported xhigh/max requests cannot increase cost.
   const thinkingLevelMap = resolveThinkingLevelMap(model);
-  if ((level === "xhigh" || level === "max") && thinkingLevelMap?.[level] === null) {
+  if (
+    (level === "xhigh" || level === "max" || level === "ultra") &&
+    thinkingLevelMap?.[level] === null
+  ) {
     for (let i = requestedIndex - 1; i >= 0; i--) {
       const candidate = EXTENDED_THINKING_LEVELS[i];
       if (availableLevels.includes(candidate)) {

@@ -27,6 +27,12 @@ describe("clampThinkingLevel", () => {
     expect(clampThinkingLevel(makeModel({ xhigh: null, max: "max" }), "xhigh")).toBe("high");
   });
 
+  it("preserves explicitly mapped ultra and downgrades explicit ultra opt-outs", () => {
+    expect(getSupportedThinkingLevels(makeModel({ ultra: "ultra" }))).toContain("ultra");
+    expect(clampThinkingLevel(makeModel({ ultra: "ultra" }), "ultra")).toBe("ultra");
+    expect(clampThinkingLevel(makeModel({ max: "max", ultra: null }), "ultra")).toBe("max");
+  });
+
   it("keeps upward clamping for lower-level map holes", () => {
     expect(clampThinkingLevel(makeModel({ minimal: null }), "minimal")).toBe("low");
   });
