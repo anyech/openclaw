@@ -1825,12 +1825,17 @@ export function resolveReasoningEffort(
   if (thinkLevel === "minimal") {
     return isModernCodexModel(modelId) ? "low" : "minimal";
   }
+  if (thinkLevel === "ultra") {
+    if (isMaxReasoningCodexModel(modelId)) {
+      return "max";
+    }
+    return isModernCodexModel(modelId) ? "xhigh" : null;
+  }
   if (
     thinkLevel === "low" ||
     thinkLevel === "medium" ||
     thinkLevel === "high" ||
-    thinkLevel === "xhigh" ||
-    thinkLevel === "ultra"
+    thinkLevel === "xhigh"
   ) {
     return thinkLevel;
   }

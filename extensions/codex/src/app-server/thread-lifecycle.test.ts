@@ -1416,6 +1416,9 @@ describe("resolveReasoningEffort (#71946)", () => {
       expect(
         resolveReasoningEffort("ultra", "gpt-5.6-sol", ["low", "medium", "high", "xhigh", "max"]),
       ).toBe("max");
+      expect(resolveReasoningEffort("ultra", "gpt-5.6-sol")).toBe("max");
+      expect(resolveReasoningEffort("ultra", "gpt-5.5")).toBe("xhigh");
+      expect(resolveReasoningEffort("ultra", "gpt-4o")).toBeNull();
     });
   });
 
