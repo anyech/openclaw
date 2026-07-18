@@ -13,6 +13,9 @@ export function buildControlUiAgentFailureText(errorText: string): string {
   return `⚠️ Agent failed before reply: ${trimmedError}.\n${CONTROL_UI_LOG_HINT}`;
 }
 
+export const STALLED_RUN_FAILURE_TEXT =
+  "⚠️ This turn was interrupted because it stopped making progress. Please try again.";
+
 /** True when text is exactly the generic external run failure copy. */
 function isGenericExternalRunFailureText(text: string | undefined): boolean {
   return text?.trim() === GENERIC_EXTERNAL_RUN_FAILURE_TEXT;
