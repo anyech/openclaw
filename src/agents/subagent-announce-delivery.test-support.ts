@@ -28,6 +28,15 @@ type Testing = {
   hasAnnounceSendEvidence(error: unknown): boolean;
   hasWriterClaimReboundAnnounceError(error: unknown): boolean;
   isWriterClaimReboundAnnounceError(error: unknown): boolean;
+  hasTargetedAutomaticDeliveryEvidence(response: unknown, target: DeliveryTarget): boolean;
+  hasTargetedMessagingToolDeliveryEvidence(response: unknown, target: DeliveryTarget): boolean;
+};
+
+type DeliveryTarget = {
+  channel?: string;
+  accountId?: string;
+  to?: string;
+  threadId?: string | number;
 };
 
 function getTesting(): Testing {
@@ -43,4 +52,8 @@ export const testing: Testing = {
     getTesting().hasWriterClaimReboundAnnounceError(error),
   isWriterClaimReboundAnnounceError: (error) =>
     getTesting().isWriterClaimReboundAnnounceError(error),
+  hasTargetedAutomaticDeliveryEvidence: (response, target) =>
+    getTesting().hasTargetedAutomaticDeliveryEvidence(response, target),
+  hasTargetedMessagingToolDeliveryEvidence: (response, target) =>
+    getTesting().hasTargetedMessagingToolDeliveryEvidence(response, target),
 };

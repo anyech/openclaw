@@ -90,6 +90,44 @@ const slackThreadOrigin = {
 function createGatewayMock(response: Record<string, unknown> = {}) {
   return vi.fn(async (opts: Parameters<typeof runtimeCallGateway>[0]) => {
     opts.onAccepted?.({ status: "accepted" });
+    const result = response.result as
+      | { payloads?: unknown[]; deliveryStatus?: unknown }
+      | undefined;
+    const params = opts.params as {
+      deliver?: boolean;
+      channel?: string;
+      accountId?: string;
+      to?: string;
+      threadId?: string | number;
+    };
+    if (
+      Array.isArray(result?.payloads) &&
+      result.payloads.length > 0 &&
+      result.deliveryStatus === undefined &&
+      params.deliver === true &&
+      params.channel &&
+      params.to
+    ) {
+      return {
+        ...response,
+        result: {
+          ...result,
+          deliveryStatus: {
+            status: "sent",
+            payloadOutcomes: result.payloads.map((_, index) => ({
+              index,
+              status: "sent",
+              target: {
+                provider: params.channel,
+                accountId: params.accountId,
+                to: params.to,
+                threadId: params.threadId,
+              },
+            })),
+          },
+        },
+      };
+    }
     return response;
   }) as unknown as typeof runtimeCallGateway;
 }
@@ -495,6 +533,127 @@ async function deliverSlackChannelAnnouncement(params: {
     isSourceSessionEffectsAllowed: params.isSourceSessionEffectsAllowed,
   });
 }
+
+describe("completion delivery target evidence", () => {
+  const requesterTarget = {
+    channel: "discord",
+    accountId: "acct-1",
+    to: "channel:C123",
+    threadId: "T456",
+  } as const;
+
+  it("requires message-tool evidence to match account and thread", () => {
+    const result = {
+      didSendViaMessagingTool: true,
+      messagingToolSentTargets: [
+        {
+          provider: "discord",
+          accountId: "acct-1",
+          to: "channel:C123",
+          threadId: "wrong-thread",
+        },
+      ],
+    };
+
+    expect(testing.hasTargetedMessagingToolDeliveryEvidence(result, requesterTarget)).toBe(false);
+    expect(
+      testing.hasTargetedMessagingToolDeliveryEvidence(
+        {
+          ...result,
+          messagingToolSentTargets: [
+            {
+              provider: "discord",
+              accountId: "acct-1",
+              to: "channel:C123",
+              threadId: "T456",
+            },
+          ],
+        },
+        requesterTarget,
+      ),
+    ).toBe(true);
+    expect(
+      testing.hasTargetedMessagingToolDeliveryEvidence(
+        {
+          ...result,
+          messagingToolSentTargets: [{ provider: "discord", to: "channel:C123", threadId: "T456" }],
+        },
+        requesterTarget,
+      ),
+    ).toBe(false);
+  });
+
+  it("requires automatic payload evidence to match the requester route", () => {
+    const result = {
+      payloads: [{ text: "completion delivered" }],
+      deliveryStatus: {
+        status: "sent",
+        payloadOutcomes: [
+          {
+            index: 0,
+            status: "sent",
+            target: {
+              provider: "discord",
+              accountId: "acct-1",
+              to: "channel:C123",
+              threadId: "wrong-thread",
+            },
+          },
+        ],
+      },
+    };
+
+    expect(testing.hasTargetedAutomaticDeliveryEvidence(result, requesterTarget)).toBe(false);
+    expect(
+      testing.hasTargetedAutomaticDeliveryEvidence(
+        { payloads: [{ text: "completion delivered without route evidence" }] },
+        { channel: "discord", accountId: "acct-1", to: "dm:U123" },
+      ),
+    ).toBe(false);
+    expect(
+      testing.hasTargetedAutomaticDeliveryEvidence(
+        {
+          ...result,
+          deliveryStatus: {
+            status: "sent",
+            payloadOutcomes: [
+              {
+                index: 0,
+                status: "sent",
+                target: {
+                  provider: "discord",
+                  accountId: "acct-1",
+                  to: "channel:C123",
+                  threadId: "T456",
+                },
+              },
+            ],
+          },
+        },
+        requesterTarget,
+      ),
+    ).toBe(true);
+    expect(
+      testing.hasTargetedAutomaticDeliveryEvidence(
+        {
+          payloads: [{ text: "failed", isError: true }, { text: "visible completion" }],
+          deliveryStatus: {
+            status: "sent",
+            payloadOutcomes: [
+              { index: 0, status: "sent", target: requesterTarget },
+              {
+                index: 1,
+                status: "sent",
+                target: { ...requesterTarget, threadId: "wrong-thread" },
+              },
+            ],
+          },
+        },
+        requesterTarget,
+      ),
+    ).toBe(false);
+  });
+});
 
 describe("resolveAnnounceOrigin threaded route targets", () => {
   it.each([
@@ -1709,7 +1868,24 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
   ])(
     "requires a successful visible grouped completion reply when the agent returns $name",
     async ({ payloads, delivered }) => {
-      const callGateway = createGatewayMock({ result: { payloads } });
+      const callGateway = createGatewayMock({
+        result: {
+          payloads,
+          deliveryStatus: {
+            status: "sent",
+            payloadOutcomes: payloads.map((_, index) => ({
+              index,
+              status: "sent",
+              target: {
+                provider: "slack",
+                accountId: "acct-1",
+                to: "channel:C123",
+                threadId: "171.222",
+              },
+            })),
+          },
+        },
+      });
       const result = await deliverSlackThreadAnnouncement({
         callGateway,
         directIdempotencyKey: "announce-thread-completion-payload-visibility",
@@ -3540,9 +3716,34 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     },
     {
       name: "accepts a yielded requester's visible final answer",
-      response: { result: { payloads: [{ text: "The consolidated answer." }] } },
+      response: {
+        result: {
+          payloads: [{ text: "The consolidated answer." }],
+          deliveryStatus: {
+            status: "sent",
+            payloadOutcomes: [
+              {
+                index: 0,
+                status: "sent",
+                target: requesterSettleSourceTarget,
+              },
+            ],
+          },
+        },
+      },
       requireVisibleReply: true,
       expected: deliveredRequesterFinal,
+    },
+    {
+      name: "rejects a yielded requester final without route evidence",
+      response: {
+        result: {
+          payloads: [{ text: "The consolidated answer." }],
+          deliveryStatus: { status: "sent", payloadOutcomes: [] },
+        },
+      },
+      requireVisibleReply: true,
+      expected: missingRequesterFinal,
     },
     {
       name: "rejects a yielded turn without a result",
@@ -3610,6 +3811,54 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
         result: {
           payloads: [{ text: "never delivered" }],
           deliveryStatus: { status: "suppressed", succeeded: true, resultCount: 0 },
+        },
+      },
+      requireVisibleReply: true,
+      expected: missingRequesterFinal,
+    },
+    {
+      name: "rejects a visible final delivered to another recipient",
+      response: {
+        result: {
+          payloads: [{ text: "delivered elsewhere" }],
+          deliveryStatus: {
+            status: "sent",
+            payloadOutcomes: [
+              {
+                index: 0,
+                status: "sent",
+                target: {
+                  provider: "discord",
+                  accountId: "acct-1",
+                  to: "dm:OTHER",
+                },
+              },
+            ],
+          },
+        },
+      },
+      requireVisibleReply: true,
+      expected: missingRequesterFinal,
+    },
+    {
+      name: "rejects a visible final delivered by another provider",
+      response: {
+        result: {
+          payloads: [{ text: "delivered by another provider" }],
+          deliveryStatus: {
+            status: "sent",
+            payloadOutcomes: [
+              {
+                index: 0,
+                status: "sent",
+                target: {
+                  channel: "slack",
+                  accountId: "acct-1",
+                  to: "dm:U123",
+                },
+              },
+            ],
+          },
         },
       },
       requireVisibleReply: true,
