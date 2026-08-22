@@ -47,6 +47,7 @@ import {
   memoryTableExists,
   requiresMemoryVectorRebuild,
 } from "./manager-vector-rebuild-state.js";
+import { buildMemorySourceFilter } from "./source-filter.js";
 import type { MemoryWatchSettleQueue } from "./watch-settle.js";
 
 export type MemorySyncProgressState = {
@@ -622,12 +623,7 @@ export abstract class MemoryManagerSyncBase {
     sourcesOverride?: MemorySource[],
   ): { sql: string; params: MemorySource[] } {
     const sources = sourcesOverride ?? Array.from(this.sources);
-    if (sources.length === 0) {
-      return { sql: "", params: [] };
-    }
-    const column = alias ? `${alias}.source` : "source";
-    const placeholders = sources.map(() => "?").join(", ");
-    return { sql: ` AND ${column} IN (${placeholders})`, params: sources };
+    return buildMemorySourceFilter(alias, sources);
   }
 
   protected openDatabase(): DatabaseSync {
