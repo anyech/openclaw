@@ -350,7 +350,7 @@ describe("memory index", () => {
     );
     await fs.writeFile(
       path.join(fixture.paths.memory, "alpha.md"),
-      "Unrelated path-only candidate.",
+      "Unrelated beta path-only candidate.",
     );
     await manager.sync({ reason: "test" });
 
