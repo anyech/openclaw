@@ -7,7 +7,11 @@ import {
   resolveRuntimeWorkerUrl,
 } from "openclaw/plugin-sdk/process-runtime";
 import type { VectorKnnChildInput, VectorKnnChildResult } from "./manager-search-knn.child.js";
-import type { VectorKnnRequest, VectorKnnResponse, VectorKnnRow } from "./manager-search-knn.js";
+import {
+  isVectorKnnRow,
+  type VectorKnnRequest,
+  type VectorKnnResponse,
+} from "./manager-search-knn.js";
 
 const MAX_STDIN_BYTES = 1024 * 1024;
 const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
@@ -130,23 +134,6 @@ function createVectorKnnAdmission(maxConcurrent: number): VectorKnnAdmission {
 
 const vectorKnnAdmission = createVectorKnnAdmission(MAX_CONCURRENT_VECTOR_KNN_CHILDREN);
 
-function isVectorKnnRow(value: unknown): value is VectorKnnRow {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const row = value as Partial<VectorKnnRow>;
-  return (
-    typeof row.id === "string" &&
-    typeof row.path === "string" &&
-    typeof row.start_line === "number" &&
-    typeof row.end_line === "number" &&
-    typeof row.text === "string" &&
-    typeof row.source === "string" &&
-    typeof row.dist === "number" &&
-    Number.isFinite(row.dist)
-  );
-}
-
 function parseChildResult(output: Buffer, maxRows: number): VectorKnnResponse {
   let parsed: unknown;
   try {
@@ -163,6 +150,7 @@ function parseChildResult(output: Buffer, maxRows: number): VectorKnnResponse {
       "protocol",
     );
   }
+  // SAFETY: the envelope object/status guard above narrows the only protocol discriminator.
   const result = parsed as VectorKnnChildResult;
   if (result.status === "failed") {
     throw new VectorKnnSubprocessError(result.error || "memory vector KNN child failed", "failed");

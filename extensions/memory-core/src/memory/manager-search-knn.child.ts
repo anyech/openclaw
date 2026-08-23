@@ -24,6 +24,7 @@ function isChildInput(value: unknown): value is VectorKnnChildInput {
   if (!value || typeof value !== "object") {
     return false;
   }
+  // SAFETY: the object guard above permits explicit validation of every field read below.
   const input = value as Partial<VectorKnnChildInput>;
   return (
     typeof input.databasePath === "string" &&

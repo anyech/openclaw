@@ -9,7 +9,7 @@ const MAX_VECTOR_KNN_K = 4096;
 const SQL_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const SOURCE_FILTER_RE = /^(?:| AND c\.source IN \(\?(?:, \?)*\))$/u;
 
-export type VectorKnnRow = {
+type VectorKnnRow = {
   id: string;
   path: string;
   start_line: number;
@@ -32,14 +32,41 @@ export type VectorKnnResponse = {
   fallbackScanRequired: boolean;
 };
 
-function readCount(row: Record<string, unknown> | undefined): number {
-  if (typeof row?.count === "bigint") {
-    return Number(row.count);
+function readCount(row: unknown): number {
+  if (!row || typeof row !== "object") {
+    return 0;
   }
-  if (typeof row?.count === "number") {
-    return row.count;
+  const count = Reflect.get(row, "count");
+  if (typeof count === "bigint") {
+    return Number(count);
+  }
+  if (typeof count === "number") {
+    return count;
   }
   return 0;
+}
+
+export function isVectorKnnRow(value: unknown): value is VectorKnnRow {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const id = Reflect.get(value, "id");
+  const path = Reflect.get(value, "path");
+  const startLine = Reflect.get(value, "start_line");
+  const endLine = Reflect.get(value, "end_line");
+  const text = Reflect.get(value, "text");
+  const source = Reflect.get(value, "source");
+  const dist = Reflect.get(value, "dist");
+  return (
+    typeof id === "string" &&
+    typeof path === "string" &&
+    typeof startLine === "number" &&
+    typeof endLine === "number" &&
+    typeof text === "string" &&
+    (source === "memory" || source === "sessions") &&
+    typeof dist === "number" &&
+    Number.isFinite(dist)
+  );
 }
 
 function buildModelFilter(column: string, models: string[]): string {
@@ -84,8 +111,8 @@ export function runVectorKnnQuery(
   validateRequest(request);
   const vectorModelFilter = buildModelFilter("c.model", request.providerModels);
   const qBlob = vectorToBlob(request.queryVec);
-  const runVectorQuery = (candidateLimit: number) =>
-    db
+  const runVectorQuery = (candidateLimit: number) => {
+    const queryRows = db
       .prepare(
         `SELECT c.id, c.path, c.start_line, c.end_line, c.text,\n` +
           `       c.source,\n` +
@@ -103,26 +130,29 @@ export function runVectorKnnQuery(
         ...request.providerModels,
         ...request.sourceFilter.params,
         request.limit,
-      ) as VectorKnnRow[];
+      );
+    return queryRows.map((row) => {
+      if (!isVectorKnnRow(row)) {
+        throw new Error("memory vector KNN query returned an invalid row");
+      }
+      return row;
+    });
+  };
 
   const candidateLimit = Math.min(request.limit * VECTOR_KNN_OVERSAMPLE_FACTOR, MAX_VECTOR_KNN_K);
   let rows = runVectorQuery(candidateLimit);
   if (rows.length < request.limit) {
-    const matchingChunkCount = readCount(
-      db
-        .prepare(
-          `SELECT COUNT(*) AS count FROM memory_index_chunks c WHERE ${vectorModelFilter}${request.sourceFilter.sql}`,
-        )
-        .get(...request.providerModels, ...request.sourceFilter.params) as
-        | Record<string, unknown>
-        | undefined,
-    );
+    const matchingChunkCountRow = db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM memory_index_chunks c WHERE ${vectorModelFilter}${request.sourceFilter.sql}`,
+      )
+      .get(...request.providerModels, ...request.sourceFilter.params);
+    const matchingChunkCount = readCount(matchingChunkCountRow);
     if (matchingChunkCount > rows.length) {
-      const vectorCount = readCount(
-        db.prepare(`SELECT COUNT(*) AS count FROM ${request.vectorTable}`).get() as
-          | Record<string, unknown>
-          | undefined,
-      );
+      const vectorCountRow = db
+        .prepare(`SELECT COUNT(*) AS count FROM ${request.vectorTable}`)
+        .get();
+      const vectorCount = readCount(vectorCountRow);
       const widenedLimit = Math.min(vectorCount, MAX_VECTOR_KNN_K);
       if (widenedLimit > candidateLimit) {
         rows = runVectorQuery(widenedLimit);
