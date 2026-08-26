@@ -1,5 +1,6 @@
 // Memory Core plugin module implements the synchronous sqlite-vec KNN query body.
 import type { DatabaseSync } from "node:sqlite";
+import { truncateUtf16Safe } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import type { MemorySource } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { vectorToBlob } from "./vector-blob.js";
 
@@ -24,6 +25,7 @@ export type VectorKnnRequest = {
   providerModels: string[];
   queryVec: number[];
   limit: number;
+  snippetMaxChars: number;
   sourceFilter: { sql: string; params: string[] };
 };
 
@@ -95,6 +97,9 @@ function validateRequest(request: VectorKnnRequest): void {
   if (!Number.isSafeInteger(request.limit) || request.limit <= 0) {
     throw new Error("invalid memory vector KNN limit");
   }
+  if (!Number.isSafeInteger(request.snippetMaxChars) || request.snippetMaxChars <= 0) {
+    throw new Error("invalid memory vector KNN snippet limit");
+  }
 }
 
 /**
@@ -135,6 +140,7 @@ export function runVectorKnnQuery(
       if (!isVectorKnnRow(row)) {
         throw new Error("memory vector KNN query returned an invalid row");
       }
+      row.text = truncateUtf16Safe(row.text, request.snippetMaxChars);
       return row;
     });
   };

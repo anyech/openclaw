@@ -470,6 +470,7 @@ export async function searchVector(params: {
         providerModels,
         queryVec: params.queryVec,
         limit: params.limit,
+        snippetMaxChars: params.snippetMaxChars,
         sourceFilter: params.sourceFilterVec,
       },
       params.signal,

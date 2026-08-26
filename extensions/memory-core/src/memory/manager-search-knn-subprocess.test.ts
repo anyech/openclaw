@@ -23,20 +23,26 @@ function request(limit: number): VectorKnnRequest {
     providerModels: ["test-model"],
     queryVec: [1, 0],
     limit,
+    snippetMaxChars: 700,
     sourceFilter: { sql: "", params: [] },
   };
 }
 
 function insertVectorRow(
   db: DatabaseSync,
-  params: { id: string; source: "memory" | "sessions"; vector: [number, number] },
+  params: {
+    id: string;
+    source: "memory" | "sessions";
+    vector: [number, number];
+    text?: string;
+  },
 ): void {
   db.prepare(
     "INSERT INTO memory_index_chunks (id, path, start_line, end_line, text, source, model) VALUES (?, ?, 1, 1, ?, ?, ?)",
   ).run(
     params.id,
     `${params.source}/${params.id}.md`,
-    `text ${params.id}`,
+    params.text ?? `text ${params.id}`,
     params.source,
     "test-model",
   );
@@ -276,6 +282,35 @@ describe("memory vector KNN subprocess boundary", () => {
       try {
         fixture.db.exec("ROLLBACK");
       } catch {}
+      fixture.cleanup();
+    }
+  });
+
+  it("bounds an oversized stored row before child protocol serialization", async () => {
+    const fixture = await createFileBackedVectorDatabase();
+    try {
+      const oversizedText = `${"x".repeat(63)}😀${"y".repeat(3 * 1024 * 1024)}`;
+      insertVectorRow(fixture.db, {
+        id: "oversized",
+        source: "memory",
+        vector: [1, 0],
+        text: oversizedText,
+      });
+
+      const result = await runVectorKnnInSubprocess({
+        databasePath: fixture.databasePath,
+        request: {
+          ...request(1),
+          snippetMaxChars: 64,
+        },
+      });
+
+      expect(result).toMatchObject({
+        fallbackScanRequired: false,
+        rows: [{ id: "oversized", text: "x".repeat(63) }],
+      });
+      expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(2 * 1024 * 1024);
+    } finally {
       fixture.cleanup();
     }
   });
