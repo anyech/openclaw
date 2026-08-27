@@ -1,4 +1,5 @@
 // Memory Core plugin module owns shared manager synchronization state.
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { DatabaseSync } from "node:sqlite";
 import type { FSWatcher } from "chokidar";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
@@ -91,6 +92,28 @@ type MemoryReindexRetryState = {
   sessionsDirtyFiles: Set<string>;
 };
 
+export class MemoryIndexDatabase {
+  readonly vector: {
+    enabled: boolean;
+    available: boolean | null;
+    semanticAvailable?: boolean;
+    extensionPath?: string;
+    loadError?: string;
+    dims?: number;
+  } = { enabled: false, available: null };
+  readonly fts: {
+    enabled: boolean;
+    available: boolean;
+    loadError?: string;
+  } = { enabled: false, available: false };
+  vectorReady: Promise<boolean> | null = null;
+  lastMetaSerialized: string | null = null;
+  vectorDegradedWriteWarningShown = false;
+  closed = false;
+
+  constructor(readonly db: DatabaseSync) {}
+}
+
 export const MEMORY_INDEX_META_KEY = "memory_index_meta_v1";
 const META_KEY = MEMORY_INDEX_META_KEY;
 const VECTOR_TABLE = MEMORY_INDEX_VECTOR_TABLE;
@@ -99,6 +122,11 @@ const EMBEDDING_CACHE_TABLE = MEMORY_EMBEDDING_CACHE_TABLE;
 const EMBEDDING_CACHE_SEED_BATCH_SIZE = 1_000;
 const VECTOR_LOAD_TIMEOUT_MS = 30_000;
 const log = createSubsystemLogger("memory");
+// One process-lifetime container; stores belong only to their awaited rebuild.
+const reindexDatabase = new AsyncLocalStorage<{
+  manager: MemoryManagerSyncBase;
+  database: MemoryIndexDatabase;
+}>();
 
 export abstract class MemoryManagerSyncBase {
   protected readonly acquireLocalService?: MemoryCoreAcquireLocalService;
@@ -124,20 +152,41 @@ export abstract class MemoryManagerSyncBase {
     { eligible: number | null; issues: string[] }
   >();
   protected providerKey: string | null = null;
-  protected abstract readonly vector: {
-    enabled: boolean;
-    available: boolean | null;
-    semanticAvailable?: boolean;
-    extensionPath?: string;
-    loadError?: string;
-    dims?: number;
-  };
-  protected readonly fts: {
-    enabled: boolean;
-    available: boolean;
-    loadError?: string;
-  } = { enabled: false, available: false };
-  protected vectorReady: Promise<boolean> | null = null;
+  protected abstract publishedDatabase: MemoryIndexDatabase;
+
+  protected get database(): MemoryIndexDatabase {
+    const context = reindexDatabase.getStore();
+    const shadow = context?.manager === this ? context.database : undefined;
+    if (shadow?.closed) {
+      throw new Error("Memory reindex database context is closed");
+    }
+    return shadow ?? this.publishedDatabase;
+  }
+
+  protected get db(): DatabaseSync {
+    return this.database.db;
+  }
+
+  protected get vector() {
+    return this.database.vector;
+  }
+
+  protected get fts() {
+    return this.database.fts;
+  }
+
+  protected withPublishedDatabase<T>(run: () => T): T {
+    // Public calls can originate in reindex progress/provider callbacks. They
+    // must never inherit the temporary writer or outlive its connection.
+    return reindexDatabase.exit(run);
+  }
+
+  protected withReindexDatabase<T>(
+    database: MemoryIndexDatabase,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    return reindexDatabase.run({ manager: this, database }, run);
+  }
   protected watcher: FSWatcher | null = null;
   protected watchTimer: NodeJS.Timeout | null = null;
   protected sessionWatchTimer: NodeJS.Timeout | null = null;
@@ -162,11 +211,8 @@ export abstract class MemoryManagerSyncBase {
   protected sessionsDirtyFiles = new Set<string>();
   protected sessionPendingFiles = new Set<string>();
   protected sessionPendingTargets = new Map<string, MemorySessionSyncTarget>();
-  protected vectorDegradedWriteWarningShown = false;
-  protected lastMetaSerialized: string | null = null;
 
   protected abstract readonly cache: { enabled: boolean; maxEntries?: number };
-  protected abstract db: DatabaseSync;
   protected abstract computeProviderKey(): string;
   protected abstract resolveProviderIndexIdentities(): MemoryIndexProviderIdentity[];
   protected abstract sync(params?: MemorySyncParams): Promise<void>;
@@ -444,20 +490,20 @@ export abstract class MemoryManagerSyncBase {
   }
 
   protected resetVectorState(): void {
-    this.vectorReady = null;
+    this.database.vectorReady = null;
     this.vector.available = null;
     this.vector.semanticAvailable = undefined;
     this.vector.loadError = undefined;
     this.vector.dims = undefined;
-    this.vectorDegradedWriteWarningShown = false;
+    this.database.vectorDegradedWriteWarningShown = false;
   }
 
   protected async ensureVectorReady(dimensions?: number): Promise<boolean> {
     if (!this.vector.enabled) {
       return false;
     }
-    if (!this.vectorReady) {
-      this.vectorReady = this.withTimeout(
+    if (!this.database.vectorReady) {
+      this.database.vectorReady = this.withTimeout(
         this.loadVectorExtension(),
         VECTOR_LOAD_TIMEOUT_MS,
         `sqlite-vec load timed out after ${Math.round(VECTOR_LOAD_TIMEOUT_MS / 1000)}s`,
@@ -465,12 +511,12 @@ export abstract class MemoryManagerSyncBase {
     }
     let ready;
     try {
-      ready = (await this.vectorReady) || false;
+      ready = (await this.database.vectorReady) || false;
     } catch (err) {
       const message = formatErrorMessage(err);
       this.vector.available = false;
       this.vector.loadError = message;
-      this.vectorReady = null;
+      this.database.vectorReady = null;
       log.warn(`sqlite-vec unavailable: ${message}`);
       return false;
     }
@@ -717,22 +763,22 @@ export abstract class MemoryManagerSyncBase {
       .prepare(`SELECT value FROM memory_index_meta WHERE key = ?`)
       .get(META_KEY) as { value: string } | undefined;
     if (!row?.value) {
-      this.lastMetaSerialized = null;
+      this.database.lastMetaSerialized = null;
       return null;
     }
     try {
       const parsed = JSON.parse(row.value) as MemoryIndexMeta;
-      this.lastMetaSerialized = row.value;
+      this.database.lastMetaSerialized = row.value;
       return parsed;
     } catch {
-      this.lastMetaSerialized = null;
+      this.database.lastMetaSerialized = null;
       return null;
     }
   }
 
   protected writeMeta(meta: MemoryIndexMeta) {
     const value = JSON.stringify(meta);
-    if (this.lastMetaSerialized === value) {
+    if (this.database.lastMetaSerialized === value) {
       return;
     }
     this.db
@@ -740,6 +786,6 @@ export abstract class MemoryManagerSyncBase {
         `INSERT INTO memory_index_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
       )
       .run(META_KEY, value);
-    this.lastMetaSerialized = value;
+    this.database.lastMetaSerialized = value;
   }
 }

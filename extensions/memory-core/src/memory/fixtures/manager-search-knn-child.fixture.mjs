@@ -19,6 +19,7 @@ process.stdin.once("end", () => {
   if (input.databasePath === "fixture:early-exit") {
     process.exit(7);
   }
+  process.stderr.write("ready\n");
   const deadline = performance.now() + Math.max(0, Number(input.request?.limit ?? 0));
   while (performance.now() < deadline) {
     // Model a synchronous native SQLite call that cannot service messages.

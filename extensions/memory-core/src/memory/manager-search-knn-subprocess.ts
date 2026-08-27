@@ -1,8 +1,6 @@
 // Parent-side subprocess boundary for synchronous sqlite-vec KNN work.
 import { spawn } from "node:child_process";
 import {
-  isPidAlive,
-  killProcessTree,
   resolveRuntimeWorkerArgv,
   resolveRuntimeWorkerUrl,
 } from "openclaw/plugin-sdk/process-runtime";
@@ -16,7 +14,6 @@ import {
 const MAX_STDIN_BYTES = 1024 * 1024;
 const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
-const GRACEFUL_KILL_GRACE_MS = 50;
 const KILL_EXIT_TIMEOUT_MS = 2_000;
 const MAX_CONCURRENT_VECTOR_KNN_CHILDREN = 2;
 
@@ -30,16 +27,9 @@ class VectorKnnSubprocessError extends Error {
   }
 }
 
-export type VectorKnnSubprocessExit = {
-  pid: number | undefined;
-  code: number | null;
-  signal: NodeJS.Signals | null;
-  pidAlive: boolean;
-};
-
-function resolveVectorKnnChildUrl(currentModuleUrl = import.meta.url): URL {
+function resolveVectorKnnChildUrl(): URL {
   return resolveRuntimeWorkerUrl({
-    currentModuleUrl,
+    currentModuleUrl: import.meta.url,
     sourceWorkerName: "manager-search-knn.child",
     distWorkerPath: "extensions/memory-core/memory-search-knn.child.js",
   });
@@ -59,13 +49,7 @@ function toAbortError(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("memory vector KNN aborted");
 }
 
-type VectorKnnAdmission = {
-  acquire: (signal?: AbortSignal) => Promise<() => void>;
-  active: () => number;
-  queued: () => number;
-};
-
-function createVectorKnnAdmission(maxConcurrent: number): VectorKnnAdmission {
+function createVectorKnnAdmission(maxConcurrent: number) {
   let active = 0;
   const waiters: Array<{
     signal?: AbortSignal;
@@ -99,7 +83,7 @@ function createVectorKnnAdmission(maxConcurrent: number): VectorKnnAdmission {
   };
 
   return {
-    acquire: async (signal) => {
+    acquire: async (signal?: AbortSignal) => {
       if (signal?.aborted) {
         throw toAbortError(signal);
       }
@@ -127,8 +111,6 @@ function createVectorKnnAdmission(maxConcurrent: number): VectorKnnAdmission {
         }
       });
     },
-    active: () => active,
-    queued: () => waiters.length,
   };
 }
 
@@ -176,16 +158,11 @@ type VectorKnnSubprocessParams = {
   extensionPath?: string;
   request: VectorKnnRequest;
   signal?: AbortSignal;
-  childUrl?: URL;
-  onSpawn?: (pid: number | undefined) => void;
-  onExit?: (exit: VectorKnnSubprocessExit) => void;
 };
 
-async function runVectorKnnWithAdmission(
+/** Run one file-backed KNN query in a bounded, OS-killable child process. */
+export async function runVectorKnnInSubprocess(
   params: VectorKnnSubprocessParams,
-  admission: VectorKnnAdmission,
-  killExitTimeoutMs: number,
-  terminateProcess: typeof killProcessTree = killProcessTree,
 ): Promise<VectorKnnResponse> {
   if (params.signal?.aborted) {
     throw toAbortError(params.signal);
@@ -200,16 +177,15 @@ async function runVectorKnnWithAdmission(
     throw new VectorKnnSubprocessError("memory vector KNN child input is too large", "protocol");
   }
 
-  const releaseAdmission = await admission.acquire(params.signal);
+  const releaseAdmission = await vectorKnnAdmission.acquire(params.signal);
   if (params.signal?.aborted) {
     releaseAdmission();
     throw toAbortError(params.signal);
   }
-  const childUrl = params.childUrl ?? resolveVectorKnnChildUrl();
   let child;
   try {
+    const childUrl = resolveVectorKnnChildUrl();
     child = spawn(process.execPath, resolveRuntimeWorkerArgv(childUrl), {
-      detached: process.platform !== "win32",
       env: buildChildEnv(),
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
@@ -222,8 +198,6 @@ async function runVectorKnnWithAdmission(
       "unavailable",
     );
   }
-  params.onSpawn?.(child.pid);
-
   return await new Promise<VectorKnnResponse>((resolve, reject) => {
     const stdoutChunks: Buffer[] = [];
     let stdoutBytes = 0;
@@ -231,7 +205,6 @@ async function runVectorKnnWithAdmission(
     let closed = false;
     let callerSettled = false;
     let terminationReason: Error | undefined;
-    let protocolFailure: Error | undefined;
     let killExitTimer: ReturnType<typeof setTimeout> | undefined;
 
     const clearKillExitTimer = () => {
@@ -259,24 +232,11 @@ async function runVectorKnnWithAdmission(
       }
       terminationReason = reason;
       child.stdin.destroy();
-      if (typeof child.pid === "number") {
-        terminateProcess(child.pid, {
-          detached: process.platform !== "win32",
-          graceMs: GRACEFUL_KILL_GRACE_MS,
-        });
-      } else {
-        child.kill("SIGKILL");
-      }
+      // This read-only Node child creates no descendants. Kill the owned handle:
+      // native SQLite cannot service graceful shutdown while its query is busy.
+      child.kill("SIGKILL");
       killExitTimer = setTimeout(() => {
         if (!closed) {
-          if (typeof child.pid === "number") {
-            terminateProcess(child.pid, {
-              detached: process.platform !== "win32",
-              force: true,
-            });
-          } else {
-            child.kill("SIGKILL");
-          }
           // The caller may return, but this child keeps its admission slot until
           // close. Destroying pipes and unref'ing prevents one unkillable OS task
           // from pinning the Gateway while the slot bounds future accumulation.
@@ -293,7 +253,7 @@ async function runVectorKnnWithAdmission(
             ),
           );
         }
-      }, GRACEFUL_KILL_GRACE_MS + killExitTimeoutMs);
+      }, KILL_EXIT_TIMEOUT_MS);
     };
     const abort = () => {
       requestTermination(toAbortError(params.signal!));
@@ -306,12 +266,12 @@ async function runVectorKnnWithAdmission(
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.byteLength;
       if (stdoutBytes > MAX_STDOUT_BYTES) {
-        protocolFailure = new VectorKnnSubprocessError(
+        const failure = new VectorKnnSubprocessError(
           "memory vector KNN child stdout exceeded its limit",
           "protocol",
         );
         stdoutChunks.length = 0;
-        requestTermination(protocolFailure);
+        requestTermination(failure);
         return;
       }
       stdoutChunks.push(chunk);
@@ -319,44 +279,29 @@ async function runVectorKnnWithAdmission(
     child.stderr.on("data", (chunk: Buffer) => {
       stderrBytes += chunk.byteLength;
       if (stderrBytes > MAX_STDERR_BYTES) {
-        protocolFailure = new VectorKnnSubprocessError(
+        const failure = new VectorKnnSubprocessError(
           "memory vector KNN child stderr exceeded its limit",
           "protocol",
         );
-        requestTermination(protocolFailure);
+        requestTermination(failure);
       }
     });
     child.stdin.on("error", (error: NodeJS.ErrnoException) => {
       if (!terminationReason && error.code !== "EPIPE") {
-        protocolFailure = new VectorKnnSubprocessError(error.message, "failed");
-        requestTermination(protocolFailure);
+        requestTermination(new VectorKnnSubprocessError(error.message, "failed"));
       }
     });
     child.once("error", (error) => {
-      protocolFailure = new VectorKnnSubprocessError(error.message, "unavailable");
-      requestTermination(protocolFailure);
+      requestTermination(new VectorKnnSubprocessError(error.message, "unavailable"));
     });
     child.once("close", (code, signal) => {
       closed = true;
-      const pidAlive = typeof child.pid === "number" && isPidAlive(child.pid);
-      params.onExit?.({ pid: child.pid, code, signal, pidAlive });
+      // close is the authoritative process/stdio completion; a recycled numeric
+      // PID must not turn a successful query into a false cleanup failure.
       releaseClosedChild();
       settleCaller(() => {
-        if (pidAlive) {
-          reject(
-            new VectorKnnSubprocessError(
-              "memory vector KNN child PID remained alive after close",
-              "termination-timeout",
-            ),
-          );
-          return;
-        }
         if (terminationReason) {
           reject(terminationReason);
-          return;
-        }
-        if (protocolFailure) {
-          reject(protocolFailure);
           return;
         }
         if (code !== 0 || signal) {
@@ -382,21 +327,3 @@ async function runVectorKnnWithAdmission(
     child.stdin.end(inputPayload);
   });
 }
-
-/** Run one file-backed KNN query in a bounded, OS-killable child process. */
-export async function runVectorKnnInSubprocess(
-  params: VectorKnnSubprocessParams,
-): Promise<VectorKnnResponse> {
-  return await runVectorKnnWithAdmission(params, vectorKnnAdmission, KILL_EXIT_TIMEOUT_MS);
-}
-
-export const testing = {
-  createVectorKnnAdmission,
-  gracefulKillGraceMs: GRACEFUL_KILL_GRACE_MS,
-  isProcessAlive: (pid: number | undefined) => (typeof pid === "number" ? isPidAlive(pid) : false),
-  maxConcurrentChildren: MAX_CONCURRENT_VECTOR_KNN_CHILDREN,
-  maxStderrBytes: MAX_STDERR_BYTES,
-  maxStdoutBytes: MAX_STDOUT_BYTES,
-  resolveVectorKnnChildUrl,
-  runVectorKnnWithAdmission,
-};

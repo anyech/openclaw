@@ -433,9 +433,6 @@ const config = {
     "extensions/signal/src/setup-core.ts": ["exports"],
     // Focused CLI tests exercise plan construction through this explicit test seam.
     "extensions/onepassword/src/secret-ref-cli.ts": ["exports"],
-    // Focused subprocess tests consume lifecycle injection and exit contracts; production uses
-    // the public runner while the full-tree companion scan audits these explicit test seams.
-    "extensions/memory-core/src/memory/manager-search-knn-subprocess.ts": ["exports", "types"],
     // Mirror config parsing, redaction mapping, cap fitting, and the runner are
     // asserted by the focused Beam mirror tests; production wires only the service.
     "extensions/beam/src/mirror.ts": ["exports", "types"],

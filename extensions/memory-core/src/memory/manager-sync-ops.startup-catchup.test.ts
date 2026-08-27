@@ -36,6 +36,7 @@ import {
   resolveConfiguredScopeHash,
   type MemoryIndexMeta,
 } from "./manager-reindex-state.js";
+import { MemoryIndexDatabase } from "./manager-sync-base.js";
 import { MemoryManagerSyncOps } from "./manager-sync-ops.js";
 
 type MemoryIndexEntry = {
@@ -170,11 +171,10 @@ class SessionStartupCatchupHarness extends MemoryManagerSyncOps {
     pollIntervalMs: 0,
     timeoutMs: 0,
   };
-  protected readonly vector = { enabled: false, available: false };
   protected readonly cache = { enabled: false };
   protected providerUnavailableReason?: string;
   protected providerLifecycle = { mode: "active" as const, providerId: "test" };
-  protected db: DatabaseSync;
+  protected publishedDatabase: MemoryIndexDatabase;
 
   readonly syncCalls: SyncParams[] = [];
   readonly indexedPaths: string[] = [];
@@ -193,7 +193,9 @@ class SessionStartupCatchupHarness extends MemoryManagerSyncOps {
   ) {
     super();
     this.sources.add("sessions");
-    this.db = database ?? createStartupHarnessDatabase(sourceRows);
+    this.publishedDatabase = new MemoryIndexDatabase(
+      database ?? createStartupHarnessDatabase(sourceRows),
+    );
   }
 
   restartForStartup(): SessionStartupCatchupHarness {
