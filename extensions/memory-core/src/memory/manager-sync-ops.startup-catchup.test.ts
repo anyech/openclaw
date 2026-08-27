@@ -31,12 +31,12 @@ import {
 } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryIndexDatabase } from "./manager-database-context.js";
 import {
   MEMORY_INDEX_PROVENANCE_VERSION,
   resolveConfiguredScopeHash,
   type MemoryIndexMeta,
 } from "./manager-reindex-state.js";
-import { MemoryIndexDatabase } from "./manager-sync-base.js";
 import { MemoryManagerSyncOps } from "./manager-sync-ops.js";
 
 type MemoryIndexEntry = {
@@ -193,9 +193,8 @@ class SessionStartupCatchupHarness extends MemoryManagerSyncOps {
   ) {
     super();
     this.sources.add("sessions");
-    this.publishedDatabase = new MemoryIndexDatabase(
-      database ?? createStartupHarnessDatabase(sourceRows),
-    );
+    const db = database ?? createStartupHarnessDatabase(sourceRows);
+    this.publishedDatabase = new MemoryIndexDatabase(db);
   }
 
   restartForStartup(): SessionStartupCatchupHarness {

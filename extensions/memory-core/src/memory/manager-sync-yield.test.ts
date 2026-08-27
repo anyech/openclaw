@@ -82,7 +82,7 @@ vi.mock("./embeddings.js", () => ({
   createEmbeddingProvider: vi.fn(),
 }));
 
-import { MemoryIndexDatabase } from "./manager-sync-base.js";
+import { MemoryIndexDatabase } from "./manager-database-context.js";
 import { MemoryManagerSyncOps } from "./manager-sync-ops.js";
 
 type MemoryIndexEntry = {

@@ -9,7 +9,7 @@ import { loadSqliteVecExtension } from "openclaw/plugin-sdk/memory-core-host-eng
 import { openNodeSqliteDatabase } from "openclaw/plugin-sdk/sqlite-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runVectorKnnInSubprocess } from "./manager-search-knn-subprocess.js";
-import { type VectorKnnRequest } from "./manager-search-knn.js";
+import type { VectorKnnRequest } from "./manager-search-knn.js";
 import { searchVector } from "./manager-search.js";
 import { buildMemorySourceFilter } from "./source-filter.js";
 import { vectorToBlob } from "./vector-blob.js";
@@ -137,7 +137,9 @@ describe("memory vector KNN subprocess boundary", () => {
     });
     await vi.waitFor(() => expect(fixture.ready).toHaveLength(1));
     await fixture.ready[0];
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
     expect(childFinished).toBe(false);
     await expect(resultPromise).resolves.toEqual({ rows: [], fallbackScanRequired: false });
   });
@@ -192,7 +194,9 @@ describe("memory vector KNN subprocess boundary", () => {
         signal: queuedController.signal,
       });
       const queuedRejection = expect(queued).rejects.toThrow("queued KNN deadline");
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
       expect(fixture.children).toHaveLength(2);
       queuedController.abort(new Error("queued KNN deadline"));
       await queuedRejection;

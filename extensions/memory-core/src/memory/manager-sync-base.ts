@@ -1,5 +1,4 @@
 // Memory Core plugin module owns shared manager synchronization state.
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { DatabaseSync } from "node:sqlite";
 import type { FSWatcher } from "chokidar";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
@@ -29,6 +28,7 @@ import {
   type EmbeddingProviderId,
   type EmbeddingProviderRuntime,
 } from "./embeddings.js";
+import { MemoryManagerDatabaseContext } from "./manager-database-context.js";
 import { openMemoryDatabaseAtPath } from "./manager-db.js";
 import {
   resolveMemoryPrimaryProviderRequest,
@@ -92,28 +92,6 @@ type MemoryReindexRetryState = {
   sessionsDirtyFiles: Set<string>;
 };
 
-export class MemoryIndexDatabase {
-  readonly vector: {
-    enabled: boolean;
-    available: boolean | null;
-    semanticAvailable?: boolean;
-    extensionPath?: string;
-    loadError?: string;
-    dims?: number;
-  } = { enabled: false, available: null };
-  readonly fts: {
-    enabled: boolean;
-    available: boolean;
-    loadError?: string;
-  } = { enabled: false, available: false };
-  vectorReady: Promise<boolean> | null = null;
-  lastMetaSerialized: string | null = null;
-  vectorDegradedWriteWarningShown = false;
-  closed = false;
-
-  constructor(readonly db: DatabaseSync) {}
-}
-
 export const MEMORY_INDEX_META_KEY = "memory_index_meta_v1";
 const META_KEY = MEMORY_INDEX_META_KEY;
 const VECTOR_TABLE = MEMORY_INDEX_VECTOR_TABLE;
@@ -122,13 +100,8 @@ const EMBEDDING_CACHE_TABLE = MEMORY_EMBEDDING_CACHE_TABLE;
 const EMBEDDING_CACHE_SEED_BATCH_SIZE = 1_000;
 const VECTOR_LOAD_TIMEOUT_MS = 30_000;
 const log = createSubsystemLogger("memory");
-// One process-lifetime container; stores belong only to their awaited rebuild.
-const reindexDatabase = new AsyncLocalStorage<{
-  manager: MemoryManagerSyncBase;
-  database: MemoryIndexDatabase;
-}>();
 
-export abstract class MemoryManagerSyncBase {
+export abstract class MemoryManagerSyncBase extends MemoryManagerDatabaseContext {
   protected readonly acquireLocalService?: MemoryCoreAcquireLocalService;
   protected abstract readonly cfg: OpenClawConfig;
   protected abstract readonly agentId: string;
@@ -152,41 +125,6 @@ export abstract class MemoryManagerSyncBase {
     { eligible: number | null; issues: string[] }
   >();
   protected providerKey: string | null = null;
-  protected abstract publishedDatabase: MemoryIndexDatabase;
-
-  protected get database(): MemoryIndexDatabase {
-    const context = reindexDatabase.getStore();
-    const shadow = context?.manager === this ? context.database : undefined;
-    if (shadow?.closed) {
-      throw new Error("Memory reindex database context is closed");
-    }
-    return shadow ?? this.publishedDatabase;
-  }
-
-  protected get db(): DatabaseSync {
-    return this.database.db;
-  }
-
-  protected get vector() {
-    return this.database.vector;
-  }
-
-  protected get fts() {
-    return this.database.fts;
-  }
-
-  protected withPublishedDatabase<T>(run: () => T): T {
-    // Public calls can originate in reindex progress/provider callbacks. They
-    // must never inherit the temporary writer or outlive its connection.
-    return reindexDatabase.exit(run);
-  }
-
-  protected withReindexDatabase<T>(
-    database: MemoryIndexDatabase,
-    run: () => Promise<T>,
-  ): Promise<T> {
-    return reindexDatabase.run({ manager: this, database }, run);
-  }
   protected watcher: FSWatcher | null = null;
   protected watchTimer: NodeJS.Timeout | null = null;
   protected sessionWatchTimer: NodeJS.Timeout | null = null;

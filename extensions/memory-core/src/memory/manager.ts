@@ -23,6 +23,7 @@ import type { MemoryCoreAcquireLocalService } from "./embedding-local-service.js
 import type { EmbeddingProvider, EmbeddingProviderRequest } from "./embeddings.js";
 import { awaitPendingManagerWork } from "./manager-async-state.js";
 import { MEMORY_BATCH_FAILURE_LIMIT } from "./manager-batch-state.js";
+import { MemoryIndexDatabase } from "./manager-database-context.js";
 import { closeMemoryDatabase } from "./manager-db.js";
 import {
   clearMemoryEmbeddingProbeCache,
@@ -47,7 +48,6 @@ import {
   resolveInitialMemoryDirty,
   resolveStatusProviderInfo,
 } from "./manager-status-state.js";
-import { MemoryIndexDatabase } from "./manager-sync-base.js";
 import { enqueueMemoryTargetedSessionSync } from "./manager-sync-control.js";
 import { resolvePersistedMemoryVectorIndexState } from "./manager-vector-rebuild-state.js";
 

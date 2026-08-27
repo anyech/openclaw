@@ -19,6 +19,7 @@ import {
   type EmbeddingProvider,
   type EmbeddingProviderRuntime,
 } from "./embeddings.js";
+import { MemoryIndexDatabase } from "./manager-database-context.js";
 import {
   cleanupAgedMemoryReindexTempFiles,
   closeMemoryDatabase,
@@ -43,11 +44,7 @@ import {
   type MemoryIndexProviderIdentity,
 } from "./manager-reindex-state.js";
 import { MemoryManagerSourceSyncOps } from "./manager-source-sync-ops.js";
-import {
-  MEMORY_INDEX_META_KEY,
-  MemoryIndexDatabase,
-  type MemorySyncProgressState,
-} from "./manager-sync-base.js";
+import { MEMORY_INDEX_META_KEY, type MemorySyncProgressState } from "./manager-sync-base.js";
 import {
   markMemoryTargetArchiveFilesDirty,
   runMemoryTargetedSessionSync,
@@ -532,7 +529,7 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
       shadow.fts.enabled = this.fts.enabled;
       // Only the awaited rebuild inherits the shadow. Concurrent searches and
       // status keep the published handle and its vector/FTS/metadata state.
-      const { nextMeta, vectorIndexComplete } = await this.withReindexDatabase(shadow, async () => {
+      const rebuilt = await this.withReindexDatabase(shadow, async () => {
         try {
           this.ensureSchema();
           await this.seedEmbeddingCache(originalDb);
@@ -622,7 +619,7 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
         }),
       );
 
-      if (vectorIndexComplete) {
+      if (rebuilt.vectorIndexComplete) {
         // Publish completeness only after the shadow tables committed. A crash
         // before this point leaves the rebuild marker conservative and retryable.
         markMemoryVectorIndexClean(originalDb);
@@ -631,7 +628,7 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
       this.resetVectorState();
       this.fts.available = shadow.fts.available;
       this.fts.loadError = shadow.fts.loadError;
-      this.vector.dims = nextMeta.vectorDims;
+      this.vector.dims = rebuilt.nextMeta.vectorDims;
     } catch (err) {
       if (tempDb && !tempDbClosed) {
         try {
