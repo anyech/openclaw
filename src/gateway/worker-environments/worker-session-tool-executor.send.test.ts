@@ -1,5 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry } from "../../config/sessions.js";
+import {
+  initializeGlobalHookRunner,
+  resetGlobalHookRunner,
+} from "../../plugins/hook-runner-global.js";
+import { createMockPluginRegistry } from "../../plugins/hooks.test-helpers.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 import {
   SOURCE,
@@ -112,7 +117,12 @@ describe("worker session tool send delivery", () => {
   let send: ReturnType<typeof getFixture>["send"];
 
   beforeEach(() => {
+    resetGlobalHookRunner();
     ({ placements, identity, execute, sourceClaim, activate, setEntry, send } = getFixture());
+  });
+
+  afterEach(() => {
+    resetGlobalHookRunner();
   });
 
   it("delivers across exact live family incarnations with the source channel", async () => {
@@ -231,27 +241,34 @@ describe("worker session tool send delivery", () => {
     expect(secondKey).not.toBe(firstKey);
   });
 
-  it("coalesces concurrent retries into one message effect", async () => {
+  it("coalesces concurrent policy blocks before message effects", async () => {
     setEntry(SOURCE.sessionKey, SOURCE.sessionId);
     setEntry(TARGET.sessionKey, TARGET.sessionId, {
       sessionKey: SOURCE.sessionKey,
       sessionId: SOURCE.sessionId,
     });
-    let finishDelivery: (() => void) | undefined;
-    delivered.mockImplementation(
-      async () =>
-        await new Promise<void>((resolve) => {
-          finishDelivery = resolve;
-        }),
+    let resolvePolicy!: (value: { block: true; blockReason: string }) => void;
+    const policy = new Promise<{ block: true; blockReason: string }>((resolve) => {
+      resolvePolicy = resolve;
+    });
+    const beforeToolCall = vi.fn(async () => await policy);
+    initializeGlobalHookRunner(
+      createMockPluginRegistry([
+        { hookName: "before_tool_call", matcher: ["sessions_send"], handler: beforeToolCall },
+      ]),
     );
 
-    const retries = Array.from({ length: 32 }, () => send("concurrent-retry"));
-    await vi.waitFor(() => expect(delivered).toHaveBeenCalledOnce());
-    finishDelivery?.();
+    const retries = Array.from({ length: 32 }, () => send("concurrent-policy-block"));
+    await vi.waitFor(() => expect(beforeToolCall).toHaveBeenCalledOnce());
+    resolvePolicy({ block: true, blockReason: "blocked by worker session policy" });
     const results = await Promise.all(retries);
+    const replay = await send("concurrent-policy-block");
 
     expect(new Set(results.map((result) => result.resultJson))).toHaveLength(1);
-    expect(delivered).toHaveBeenCalledOnce();
+    expect(replay.resultJson).toBe(results[0]?.resultJson);
+    expect(replay.resultJson).toContain("blocked by worker session policy");
+    expect(beforeToolCall).toHaveBeenCalledOnce();
+    expect(delivered).not.toHaveBeenCalled();
   });
 
   it("replays a completed send after the target incarnation changes", async () => {
