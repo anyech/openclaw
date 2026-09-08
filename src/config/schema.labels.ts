@@ -2,6 +2,7 @@
 import { MEDIA_AUDIO_FIELD_LABELS } from "./media-audio-field-metadata.js";
 import { GATEWAY_FIELD_LABELS } from "./schema.gateway-labels.js";
 import { AGENT_MODEL_FIELD_LABELS } from "./schema.labels.agent-models.js";
+import { AUTH_FIELD_LABELS } from "./schema.labels.auth.js";
 import { SESSION_FIELD_LABELS } from "./schema.labels.session.js";
 import { WORKSPACE_FIELD_LABELS } from "./schema.labels.workspace.js";
 import { META_FIELD_LABELS } from "./schema.meta.js";
@@ -442,9 +443,7 @@ export const FIELD_LABELS: Record<string, string> = {
   "memory.search.cache.enabled": "Memory Search Embedding Cache",
   memory: "Memory",
   "memory.citations": "Memory Citations Mode",
-  auth: "Auth",
-  "auth.profiles": "Auth Profiles",
-  "auth.order": "Auth Profile Order",
+  ...AUTH_FIELD_LABELS,
   acp: "ACP",
   "acp.enabled": "ACP Enabled",
   "acp.dispatch.enabled": "ACP Dispatch Enabled",
