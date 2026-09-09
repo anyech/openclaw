@@ -98,7 +98,7 @@ function buildSlackFetch(
 }
 
 function fenceSlackReadFetch(
-  fetch: NonNullable<WebClientOptions["fetch"]>,
+  slackFetch: NonNullable<WebClientOptions["fetch"]>,
 ): NonNullable<WebClientOptions["fetch"]> {
   // Read/lookup clients are operation-local. Capture before the SDK queues or
   // retries, and also honor a caller scope when an unscoped client is reused.
@@ -106,7 +106,7 @@ function fenceSlackReadFetch(
   return (input, init) => {
     assertReadAuthority?.();
     captureChannelReadAuthority()?.();
-    return fetch(input, init);
+    return slackFetch(input, init);
   };
 }
 
