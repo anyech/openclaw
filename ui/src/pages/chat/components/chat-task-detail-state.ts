@@ -8,6 +8,7 @@ import { catalogItemMessage } from "../catalog-item-message.ts";
 import type { ChatHistoryResult } from "../chat-history-snapshot.ts";
 
 const TASK_TRANSCRIPT_REFRESH_MS = 2_000;
+const TASK_TRANSCRIPT_RETRY_MS = 10_000;
 // Keep the session preview window and native paginated history bounded.
 const TASK_TRANSCRIPT_REQUEST_LIMIT = 800;
 
@@ -76,7 +77,11 @@ function scheduleTranscriptLoad(
   if (host.taskDetailState !== state || state.inFlight) {
     return;
   }
-  const remaining = TASK_TRANSCRIPT_REFRESH_MS - (Date.now() - state.lastRequestStartedAt);
+  const interval =
+    state.native && state.load.status === "error"
+      ? TASK_TRANSCRIPT_RETRY_MS
+      : TASK_TRANSCRIPT_REFRESH_MS;
+  const remaining = interval - (Date.now() - state.lastRequestStartedAt);
   if (!olderCursor && remaining > 0) {
     if (state.refreshTimer === null) {
       state.refreshTimer = window.setTimeout(() => {
@@ -102,7 +107,7 @@ function scheduleTranscriptLoad(
   const eventVersion = state.eventVersion;
   state.inFlight = true;
   state.lastRequestStartedAt = Date.now();
-  if (state.load.status !== "loaded") {
+  if (state.load.status !== "loaded" && !(state.native && state.load.status === "error")) {
     state.load = { status: "loading" };
   }
   if (olderCursor && state.load.status === "loaded") {
@@ -206,10 +211,7 @@ function scheduleTranscriptLoad(
     host.requestUpdate?.();
     // Events that arrived during this request own a later snapshot. This also
     // guarantees one final history read after a terminal transition.
-    if (
-      state.eventVersion > eventVersion ||
-      (state.native && state.active && load.status === "loaded")
-    ) {
+    if (state.eventVersion > eventVersion || (state.native && state.active)) {
       scheduleTranscriptLoad(host, state);
     }
   })();

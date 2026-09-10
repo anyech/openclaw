@@ -170,7 +170,11 @@ function renderTaskTranscript(params: {
   }
   if (load.status === "error") {
     return html`<div class="sidebar-content chat-task-detail__state chat-task-detail__state--error">
-      ${t("chat.backgroundTasks.transcriptFailed")}
+      ${
+        !params.sessionKey && isActiveTask(params.task)
+          ? t("chat.backgroundTasks.transcriptRetrying")
+          : t("chat.backgroundTasks.transcriptFailed")
+      }
     </div>`;
   }
   if (load.messages.length === 0 && !load.nextCursor) {

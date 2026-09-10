@@ -339,6 +339,41 @@ describe("native task inspection", () => {
     resetTaskDetail(host);
   });
 
+  it.each(["tasks.get", "tasks.history"])(
+    "recovers after a transient %s failure without parent events",
+    async (failingMethod) => {
+      vi.useFakeTimers();
+      let unavailable = true;
+      const request = vi.fn(async (method: string) => {
+        if (unavailable && method === failingMethod) {
+          throw new Error("Temporarily unavailable");
+        }
+        return method === "tasks.get"
+          ? { task: nativeTask(unavailable ? "running" : "completed") }
+          : { taskId: "task-1", items: [item("final", "Recovered child output")] };
+      });
+      const host = hostWith(request);
+      readTaskTranscript(host, selection);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(readTaskTranscript(host, selection)).toEqual({ status: "error" });
+      const failedCalls = request.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(request).toHaveBeenCalledTimes(failedCalls);
+
+      unavailable = false;
+      await vi.advanceTimersByTimeAsync(1);
+      expect(readTaskTranscript(host, selection)).toMatchObject({
+        status: "loaded",
+        messages: [{ content: [{ text: "Recovered child output" }] }],
+      });
+      expect(readTaskDetailSnapshot(host, nativeTask("running")).status).toBe("completed");
+      const settledCalls = request.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(request).toHaveBeenCalledTimes(settledCalls);
+      resetTaskDetail(host);
+    },
+  );
+
   it.each(["selection", "close", "disconnect", "epoch"] as const)(
     "ignores late native history after %s changes",
     async (change) => {
