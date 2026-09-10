@@ -159,7 +159,7 @@ export function createCodexTaskHistory(params: {
               if (!item.id?.trim()) {
                 throw new CatalogParamsError("Codex task item identity is unavailable");
               }
-              return { ...item, id: item.id };
+              return Object.assign(item, { id: item.id });
             }),
           ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
         };
