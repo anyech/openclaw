@@ -5867,6 +5867,7 @@ export const en: TranslationMap & {
       worked: "Worked",
     },
     backgroundTasks: {
+      loadOlder: "Load older activity",
       label: "Background tasks",
       title: "Background tasks",
       show: "Show background tasks",
