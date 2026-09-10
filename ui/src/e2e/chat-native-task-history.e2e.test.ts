@@ -92,13 +92,13 @@ describe("native task inspection", () => {
         .waitFor();
       const historyRequests = await gateway.getRequests("tasks.history");
       expect(historyRequests.length).toBeGreaterThanOrEqual(2);
-      expect(historyRequests.every((request) => request.params.taskId === task.id)).toBe(true);
-      expect(historyRequests.every((request) => !("threadId" in request.params))).toBe(true);
-      expect(
-        (await gateway.getRequests("chat.history")).every(
-          (request) => request.params.sessionKey === task.sessionKey,
-        ),
-      ).toBe(true);
+      for (const request of historyRequests) {
+        expect(request.params).toMatchObject({ taskId: task.id });
+        expect(request.params).not.toHaveProperty("threadId");
+      }
+      for (const request of await gateway.getRequests("chat.history")) {
+        expect(request.params).toMatchObject({ sessionKey: task.sessionKey });
+      }
     } finally {
       await context.close();
     }
