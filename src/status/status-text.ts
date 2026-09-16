@@ -595,8 +595,9 @@ export async function buildStatusReplyParts(
   );
   const requestedThinkLevel =
     resolvedThinkLevel ??
-    explicitThinkingDefault ??
+    agentConfig?.thinkingDefault ??
     (await resolveDefaultThinkingLevel()) ??
+    agentDefaults.thinkingDefault ??
     (sessionEntry?.thinkingLevel as ThinkLevel | undefined) ??
     "off";
   // Active profiles can forbid `off` (for example, always-thinking models). Absence means

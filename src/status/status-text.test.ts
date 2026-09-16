@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveThinkingDefault } from "../agents/model-thinking-default.js";
 import {
   addSubagentRunForTests,
   resetSubagentRegistryForTests,
@@ -363,6 +364,52 @@ describe("session status cost line", () => {
 });
 
 describe("buildStatusText thinking facts", () => {
+  it.each([
+    { name: "model default", modelThinking: "medium", expected: "medium" },
+    { name: "disabled model thinking", modelThinking: false, expected: "off" },
+    { name: "global fallback", modelThinking: undefined, expected: "xhigh" },
+    { name: "agent override", modelThinking: "medium", agentThinking: "high", expected: "high" },
+    { name: "session override", modelThinking: "medium", resolved: "low", expected: "low" },
+  ] as const)("shows $name instead of an unrelated global default", async (scenario) => {
+    const cfg: StatusTextParams["cfg"] = {
+      agents: {
+        defaults: {
+          thinkingDefault: "xhigh",
+          models: { "openai/gpt-5.4": { params: { thinking: scenario.modelThinking } } },
+        },
+        list: [
+          {
+            id: "main",
+            ...("agentThinking" in scenario ? { thinkingDefault: scenario.agentThinking } : {}),
+          },
+        ],
+      },
+    };
+    const text = await buildStatusText({
+      cfg,
+      sessionEntry: { sessionId: "thinking-defaults", updatedAt: 0 },
+      sessionKey: "agent:main:main",
+      statusChannel: "discord",
+      provider: "openai",
+      model: "gpt-5.4",
+      resolvedHarness: "codex",
+      ...("resolved" in scenario ? { resolvedThinkLevel: scenario.resolved } : {}),
+      resolvedVerboseLevel: "off",
+      resolvedReasoningLevel: "off",
+      resolveDefaultThinkingLevel: async () =>
+        resolveThinkingDefault({ cfg, provider: "openai", model: "gpt-5.4" }),
+      isGroup: false,
+      defaultGroupActivation: () => "mention",
+      pluginHealthLineOverride: "Plugins: test",
+      taskLineOverride: "",
+      skipDefaultTaskLookup: true,
+      modelAuthOverride: "test",
+      activeModelAuthOverride: "test",
+      includeTranscriptUsage: false,
+    });
+    expect(text).toContain(`think ${scenario.expected}`);
+  });
+
   it("keeps the prepared thinking level for a discovered Ollama reasoning model", async () => {
     const text = await buildStatusText({
       cfg: {},
