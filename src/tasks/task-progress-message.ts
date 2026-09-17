@@ -1,3 +1,4 @@
+import { getChannelPlugin } from "../channels/plugins/registry.js";
 import type { TaskRegistryDeliveryRuntime } from "./task-registry-runtime-loaders.js";
 
 type ProgressSendParams = Parameters<TaskRegistryDeliveryRuntime["sendMessage"]>[0] & {
@@ -68,11 +69,18 @@ export function publishTaskProgressMessage(
     ) {
       return;
     }
+    // Receipt kinds describe platform destinations, not portable address prefixes.
+    const destination = getChannelPlugin(sent.channel)?.messaging?.resolveDeliveryTarget?.({
+      conversationId: result.target.id,
+    }) ?? { to: `${result.target.kind}:${result.target.id}` };
+    if (!destination.to) {
+      return;
+    }
     state.target = {
       channel: sent.channel,
-      to: `${result.target.kind}:${result.target.id}`,
+      to: destination.to,
       accountId: params.accountId,
-      threadId: result.receipt?.threadId ?? params.threadId,
+      threadId: result.receipt?.threadId ?? destination.threadId ?? params.threadId,
       messageId: result.messageId,
     };
     state.content = params.content;
