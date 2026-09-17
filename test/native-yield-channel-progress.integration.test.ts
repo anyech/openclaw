@@ -23,6 +23,7 @@ import {
 } from "../src/tasks/task-runtime.test-helpers.js";
 import { loadBundledPluginFacade } from "../src/test-utils/bundled-plugin-public-surface.js";
 import { createTestRegistry } from "../src/test-utils/channel-plugins.js";
+import { captureNativeYieldDispatchScope } from "./native-yield-dispatch.test-support.js";
 
 const codexTestApi = await loadBundledPluginFacade<
   typeof import("../extensions/codex/test-api.js")
@@ -81,7 +82,9 @@ beforeEach(async () => {
       );
     });
   });
-  await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => {
+    server!.listen(0, "127.0.0.1", resolve);
+  });
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("No loopback port");
@@ -123,9 +126,13 @@ const effects = () => captured.filter(({ method }) => method === "POST" || metho
 
 it("composes successful native yield through real publisher and Discord HTTP send/edit", async () => {
   const native = await fixture.createNativeYieldChannelProof({
-    scope: createAgentHarnessTaskRuntimeScope({
-      requesterSessionKey: sessionKey,
-      requesterOrigin: origin,
+    scope: await captureNativeYieldDispatchScope({
+      workspaceDir: path.join(dirs[dirs.length - 1]!, "dispatch-workspace"),
+      config: cfg,
+      sessionKey,
+      messageProvider: origin.channel,
+      agentAccountId: origin.accountId,
+      messageTo: origin.to,
     }),
     config: cfg,
   });

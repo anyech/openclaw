@@ -93,7 +93,9 @@ export async function createNativeYieldChannelProof(params: {
       );
     }),
   ]);
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
   const notify = async (notification: CodexServerNotification) =>
     await harness.notify(notification);
   await notify({
@@ -166,7 +168,9 @@ export async function createNativeYieldChannelProof(params: {
         },
       });
       expect(result).toMatchObject({ success: true });
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
       await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
       const terminal = await run;
       expect(readAttemptTerminal(terminal)).toMatchObject({ aborted: false, promptError: null });

@@ -490,7 +490,9 @@ describe("yield-authorized harness progress", () => {
         onStopped: stopped,
       });
       progress?.notify();
-      if (boundary !== "handoff") current = false;
+      if (boundary !== "handoff") {
+        current = false;
+      }
       if (boundary === "notify") {
         progress?.notify();
         expect(stopped).toHaveBeenCalledOnce();
