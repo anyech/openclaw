@@ -70,7 +70,11 @@ export function registerHarnessTaskProgress(params: {
   return {
     dispose,
     notify: () => {
-      if (stopped || !params.isCurrent()) {
+      if (stopped) {
+        return;
+      }
+      if (!params.isCurrent()) {
+        dispose();
         return;
       }
       const rows = params.readTasks();
@@ -198,6 +202,7 @@ function prepareProgressBatch(key: string, batch: TaskProgressBatch) {
     taskProgressBatches.get(key) !== batch ||
     batch.lifecycleGeneration !== getAgentRunLifecycleGeneration()
   ) {
+    batch.harness?.stop();
     return undefined;
   }
   if (batch.harness) {
@@ -205,10 +210,12 @@ function prepareProgressBatch(key: string, batch: TaskProgressBatch) {
       !batch.harness.isCurrent() ||
       !canDeliverToRequesterOrigin(batch.harness.owner.requesterOrigin)
     ) {
+      batch.harness.stop();
       return undefined;
     }
     const rows = batch.harness.readTasks();
     if (rows.length === 0) {
+      batch.harness.stop();
       return undefined;
     }
     const terminal = rows.every((task) => isTerminalTaskStatus(task.status));
@@ -376,8 +383,10 @@ async function publishProgressBatch(key: string, batch: TaskProgressBatch) {
     batch.publishing = false;
     // A completion observed during transport still owes its final snapshot.
     if (
-      batch.revision === revision &&
-      batch.harness?.readTasks().every((task) => isTerminalTaskStatus(task.status))
+      batch.harness &&
+      (!batch.harness.isCurrent() ||
+        (batch.revision === revision &&
+          batch.harness.readTasks().every((task) => isTerminalTaskStatus(task.status))))
     ) {
       batch.harness.stop();
     }

@@ -73,12 +73,21 @@ export function authorizeNativeSubagentProgress(params: {
   if (children.length === 0) {
     return;
   }
+  const owner = {
+    notify: () => {
+      // Authorization precedes foreground teardown. Do not enqueue until detached.
+      if (parent.owners.size === 0) {
+        progress?.notify();
+      }
+    },
+    dispose: () => progress?.dispose(),
+  };
   const progress = runtime.registerProgressOwner?.({
     runIds: children.map(({ runId }) => runId),
     agentId: registration.agentId,
     isCurrent: (): boolean =>
       params.isCurrentParent() &&
-      parent.progressOwner === progress &&
+      parent.progressOwner === owner &&
       parent.owners.size === 0 &&
       children.every(({ child, runId }) => {
         const current = params.children.get(runId);
@@ -89,11 +98,11 @@ export function authorizeNativeSubagentProgress(params: {
         );
       }),
     onStopped: () => {
-      if (parent.progressOwner === progress) {
+      if (parent.progressOwner === owner) {
         parent.progressOwner = undefined;
         params.prune();
       }
     },
   });
-  parent.progressOwner = progress;
+  parent.progressOwner = progress ? owner : undefined;
 }

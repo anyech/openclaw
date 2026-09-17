@@ -22,9 +22,15 @@ import {
   resolveSubagentCompletionOrigin,
 } from "../agents/subagents/announce/subagent-announce-origin.js";
 import {
+  getAgentRunContext,
+  getAgentRunLifecycleGeneration,
+  listAgentRunsForSession,
+} from "../infra/agent-run-registry.js";
+import {
   getGatewayContextResolver,
   withPluginRuntimeGatewayContextResolver,
 } from "../plugins/runtime/gateway-request-scope.js";
+import { sessionChanges } from "../sessions/session-row-changes.js";
 import {
   assertAgentHarnessTaskRuntimeScope,
   type AgentHarnessTaskRuntimeScope,
@@ -162,6 +168,54 @@ export function createAgentHarnessTaskRuntime(
     );
   return {
     registerProgressOwner(progress) {
+      const readRequester = () => {
+        try {
+          return loadRequesterSessionEntry(requesterSessionKey);
+        } catch {
+          // Optional presentation must fail closed without breaking turn finalization.
+          return undefined;
+        }
+      };
+      const requester = readRequester();
+      const sessionId = requester?.entry?.sessionId;
+      const lifecycleRevision = requester?.entry?.lifecycleRevision;
+      if (
+        !sessionId ||
+        !requester?.agentId ||
+        (progress.agentId && progress.agentId !== requester.agentId)
+      ) {
+        return undefined;
+      }
+      const lifecycleGeneration = getAgentRunLifecycleGeneration();
+      const readRuns = () =>
+        listAgentRunsForSession({ sessionKey: requester.canonicalKey, sessionId }).filter(
+          ({ runId }) => getAgentRunContext(runId)?.projectSessionLifecycle !== false,
+        );
+      const originalRuns = new Map(
+        readRuns().map(({ runId }) => [runId, getAgentRunContext(runId)]),
+      );
+      let retired = false;
+      let unsubscribe: (() => void) | undefined;
+      // Host run registration, not a provider thread, owns requester resumption.
+      // Latch retirement so finishing the new turn cannot revive the old card.
+      const isRequesterCurrent = () => {
+        if (retired) {
+          return false;
+        }
+        const current = readRequester();
+        const valid =
+          current !== undefined &&
+          getAgentRunLifecycleGeneration() === lifecycleGeneration &&
+          current.agentId === requester.agentId &&
+          current.canonicalKey === requester.canonicalKey &&
+          current.entry?.sessionId === sessionId &&
+          current.entry.lifecycleRevision === lifecycleRevision &&
+          readRuns().every(({ runId }) => originalRuns.get(runId) === getAgentRunContext(runId));
+        if (!valid) {
+          retired = true;
+        }
+        return valid;
+      };
       for (const runId of progress.runIds) {
         assertRunId(runId);
       }
@@ -183,7 +237,7 @@ export function createAgentHarnessTaskRuntime(
         owner: {
           sessionKey: requesterSessionKey,
           requesterOrigin: origin,
-          agentId: progress.agentId,
+          agentId: requester.agentId,
         },
         readTasks: () =>
           scopedTasks().filter((task) => {
@@ -194,9 +248,23 @@ export function createAgentHarnessTaskRuntime(
               original?.backing === JSON.stringify(readTaskBackingInstance(task.detail))
             );
           }),
-        isCurrent: progress.isCurrent,
-        onStopped: progress.onStopped,
+        isCurrent: () => isRequesterCurrent() && progress.isCurrent(),
+        onStopped: () => {
+          retired = true;
+          unsubscribe?.();
+          progress.onStopped();
+        },
       });
+      if (registration) {
+        unsubscribe = sessionChanges.subscribe((change) => {
+          if ("sessionKey" in change && change.sessionKey !== requester.canonicalKey) {
+            return;
+          }
+          if (!isRequesterCurrent()) {
+            registration.dispose();
+          }
+        });
+      }
       return registration;
     },
     createRunningTaskRun(taskParams) {

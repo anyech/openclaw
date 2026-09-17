@@ -35,6 +35,16 @@ import {
   setTaskRegistryDeliveryRuntimeForTests,
 } from "./task-runtime.test-helpers.js";
 
+vi.mock("../agents/subagents/announce/subagent-announce-delivery.js", () => ({
+  loadRequesterSessionEntry: (key: string) => ({
+    canonicalKey: key,
+    agentId: "main",
+    entry: { sessionId: "synthetic-parent", lifecycleRevision: "one" },
+  }),
+  deliverSubagentAnnouncement: vi.fn(),
+  isInternalAnnounceRequesterSession: vi.fn(),
+}));
+
 vi.mock("../utils/message-channel.js", () => ({
   isDeliverableMessageChannel: (channel: string) => channel === "notifychat",
 }));
@@ -459,6 +469,39 @@ describe("yield-authorized harness progress", () => {
       );
       expect(sendMessage).toHaveBeenCalledOnce();
       expect(stopped).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["notify", "timer", "handoff"])(
+    "releases an invalid nonterminal owner at %s",
+    async (boundary) => {
+      const { runtime, task } = harness();
+      let current = true;
+      const stopped = vi.fn();
+      sendMessage.mockImplementation(async (params) => {
+        current = false;
+        params.assertDirectAdapterHandoff?.();
+        throw new Error("Invalidated before dispatch");
+      });
+      setTaskRegistryDeliveryRuntimeForTests({ sendMessage, isTaskProgressEnabled: () => true });
+      const progress = runtime.registerProgressOwner?.({
+        runIds: [task.runId!],
+        isCurrent: () => current,
+        onStopped: stopped,
+      });
+      progress?.notify();
+      if (boundary !== "handoff") current = false;
+      if (boundary === "notify") {
+        progress?.notify();
+        expect(stopped).toHaveBeenCalledOnce();
+      }
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(stopped).toHaveBeenCalledOnce();
+      expect(getTaskById(task.taskId)?.status).toBe("running");
+      progress?.notify();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(stopped).toHaveBeenCalledOnce();
+      expect(sendMessage).toHaveBeenCalledTimes(boundary === "handoff" ? 1 : 0);
     },
   );
 
