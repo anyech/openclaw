@@ -404,6 +404,10 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
     releaseSharedClientLeaseAndRetireOneShotClient,
     releaseSandboxExecEnvironment,
     runCleanupStep,
+    authorizeRetentionAfterSuccessfulYield: () => {
+      state.nativeHookRelay?.authorizeRetentionAfterSuccessfulYield();
+      state.nativeSubagentMonitor?.authorizeProgressAfterSuccessfulYield();
+    },
     registerNativeSubagentMonitor,
     releaseCurrentRoute,
     startupTimeoutMs,

@@ -36,7 +36,9 @@ import {
   setDetachedTaskDeliveryStatusByRunId,
 } from "../tasks/detached-task-runtime.js";
 import { listTaskRecords, type TaskRecord } from "../tasks/runtime-internal.js";
+import { readTaskBackingInstance } from "../tasks/task-backing-authority.js";
 import { captureTaskExecutionOwner } from "../tasks/task-execution-owner.js";
+import { registerHarnessTaskProgress } from "../tasks/task-registry-progress.js";
 
 export type { TaskRecord as AgentHarnessTaskRecord };
 export type { AgentHarnessTaskRuntimeScope };
@@ -102,6 +104,13 @@ export type AgentHarnessTaskRuntime = {
   setDetachedTaskDeliveryStatusByRunId(
     params: AgentHarnessScopedSetDeliveryStatusParams,
   ): TaskRecord[];
+  /** Live, explicit yield authority; does not alter task completion notification policy. */
+  registerProgressOwner?(params: {
+    runIds: string[];
+    agentId?: string;
+    isCurrent: () => boolean;
+    onStopped: () => void;
+  }): { notify: () => void; dispose: () => void } | undefined;
   listTaskRecords(): TaskRecord[];
 };
 
@@ -142,7 +151,54 @@ export function createAgentHarnessTaskRuntime(
       executionOwner,
     });
   };
+  const scopedTasks = () =>
+    listTaskRecords().filter(
+      (task) =>
+        task.runtime === runtime &&
+        (!taskKind || task.taskKind === taskKind) &&
+        task.scopeKind === "session" &&
+        task.ownerKey === requesterSessionKey &&
+        (!runIdPrefix || task.runId?.startsWith(runIdPrefix)),
+    );
   return {
+    registerProgressOwner(progress) {
+      for (const runId of progress.runIds) {
+        assertRunId(runId);
+      }
+      const ids = new Set(progress.runIds);
+      const captured = new Map(
+        scopedTasks()
+          .filter((task) => ids.has(task.runId ?? ""))
+          .map((task) => [
+            task.taskId,
+            {
+              runId: task.runId,
+              backing: JSON.stringify(readTaskBackingInstance(task.detail)),
+              createdAt: task.createdAt,
+            },
+          ]),
+      );
+      const origin = scope.requesterOrigin ? { ...scope.requesterOrigin } : undefined;
+      const registration = registerHarnessTaskProgress({
+        owner: {
+          sessionKey: requesterSessionKey,
+          requesterOrigin: origin,
+          agentId: progress.agentId,
+        },
+        readTasks: () =>
+          scopedTasks().filter((task) => {
+            const original = captured.get(task.taskId);
+            return (
+              original?.runId === task.runId &&
+              original?.createdAt === task.createdAt &&
+              original?.backing === JSON.stringify(readTaskBackingInstance(task.detail))
+            );
+          }),
+        isCurrent: progress.isCurrent,
+        onStopped: progress.onStopped,
+      });
+      return registration;
+    },
     createRunningTaskRun(taskParams) {
       const task = tryCreateRunningTaskRun(taskParams);
       if (!task) {
@@ -175,16 +231,7 @@ export function createAgentHarnessTaskRuntime(
         sessionKey: requesterSessionKey,
       });
     },
-    listTaskRecords() {
-      return listTaskRecords().filter(
-        (task) =>
-          task.runtime === runtime &&
-          (!taskKind || task.taskKind === taskKind) &&
-          task.scopeKind === "session" &&
-          task.ownerKey === requesterSessionKey &&
-          (!runIdPrefix || task.runId?.startsWith(runIdPrefix)),
-      );
-    },
+    listTaskRecords: scopedTasks,
   };
 }
 
