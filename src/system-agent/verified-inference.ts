@@ -43,6 +43,7 @@ import {
 } from "../plugins/providers.js";
 import {
   projectInferenceRoute,
+  systemAgentRouteOptions,
   resolveSystemAgentConfiguredRouteFromConfig,
   type SystemAgentConfiguredRoute,
   type SystemAgentConfiguredRouteDeps,
@@ -423,11 +424,8 @@ async function projectVerifiedExecutionFingerprint(
   ownerPluginIds: readonly string[],
   deps: SystemAgentVerifiedInferenceDeps,
 ): Promise<SystemAgentVerifiedExecutionFingerprint> {
-  const projection = await projectInferenceRoute(config, route.agentId, {
-    ...deps,
-    modelTarget: route.modelTarget,
-    fallbackModelRef: route.fallbackModelRef,
-  });
+  const options = systemAgentRouteOptions(route, deps);
+  const projection = await projectInferenceRoute(config, route.agentId, options);
   const { authProfileId: _authProfileId, ...routeIdentity } = projection.route ?? {};
   return {
     route: projection.route ? routeIdentity : null,
@@ -891,11 +889,7 @@ async function resolveSystemAgentVerifiedInferenceStateInternal(
   const currentRoute = await resolveSystemAgentConfiguredRouteFromConfig(
     config,
     binding.execution.agentId,
-    {
-      ...deps,
-      modelTarget: binding.execution.modelTarget,
-      fallbackModelRef: binding.execution.fallbackModelRef,
-    },
+    systemAgentRouteOptions(binding.execution, deps),
     snapshot,
   );
   if (
