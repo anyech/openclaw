@@ -87,15 +87,17 @@ export async function resolveSystemAgentConfiguredFallbackRefs(
     const resolved = selection.resolveModelRefFromString({ ...options, aliasIndex, raw });
     return resolved ? [{ raw, ref: resolved.ref }] : [];
   });
-  return resolveModelCandidateChain({
+  const candidates = resolveModelCandidateChain({
     ...options,
     ...primary,
     requestedRouteResolution: "resolved",
-  }).flatMap((candidate) =>
-    refs
-      .filter(({ ref }) => ref.provider === candidate.provider && ref.model === candidate.model)
-      .map(({ raw }) => raw),
-  );
+  });
+  // Candidate deduplication omits profile pins; retain the authored reference order.
+  return refs
+    .filter(({ ref }) =>
+      candidates.some(({ provider, model }) => ref.provider === provider && ref.model === model),
+    )
+    .map(({ raw }) => raw);
 }
 
 /** The canonical source and default-materialized view from one authoritative read. */
