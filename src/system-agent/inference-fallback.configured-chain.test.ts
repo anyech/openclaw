@@ -66,6 +66,7 @@ function probeFixture(
     winner?: string;
     winnerModel?: string;
     primaryFailure?: "auth" | "format";
+    failedProfiles?: string[];
     afterResponse?: () => Promise<void>;
   } = {},
 ) {
@@ -78,7 +79,10 @@ function probeFixture(
     const provider = params.provider!;
     const model = params.model!;
     attempts.push({ provider, model, profile: params.authProfileId });
-    if (`${provider}/${model}` === primary) {
+    if (
+      `${provider}/${model}` === primary ||
+      options.failedProfiles?.includes(params.authProfileId ?? "")
+    ) {
       throw new FailoverError("Synthetic primary outage", {
         reason: options.primaryFailure ?? "auth",
       });
@@ -263,6 +267,70 @@ describe("bound maintenance configured model fallbacks", () => {
       expect(await resolveSystemAgentVerifiedInferenceRoute(result.binding)).toBe(
         result.binding.execution,
       );
+    });
+  });
+
+  it("preserves authored order across interleaved profile-pinned fallback references", async () => {
+    await withOpenClawTestState({ label: "interleaved-fallback-pins" }, async (state) => {
+      const config = configuredChain();
+      const first = `${backup}@fixture-backup:first`;
+      const second = "fixture-third/third@fixture-third:second";
+      const provider = expectDefined(
+        config.models?.providers?.["fixture-backup"],
+        "backup provider",
+      );
+      config.models!.providers!["fixture-third"] = {
+        ...provider,
+        models: [
+          {
+            ...expectDefined(provider.models[0], "backup model"),
+            id: "third",
+            name: "Third fixture",
+          },
+        ],
+      };
+      config.agents!.defaults!.models!["fixture-third/third"] = {
+        agentRuntime: { id: "openclaw" },
+      };
+      const third = `${backup}@fixture-backup:third`;
+      config.agents!.defaults!.model = { primary, fallbacks: [first, second, third] };
+      await state.writeConfig(config);
+      await state.writeAuthProfiles({
+        version: 1,
+        profiles: {
+          "fixture-backup:first": {
+            type: "api_key",
+            provider: "fixture-backup",
+            key: "first-fixture-key",
+          },
+          "fixture-third:second": {
+            type: "api_key",
+            provider: "fixture-third",
+            key: "second-fixture-key",
+          },
+          "fixture-backup:third": {
+            type: "api_key",
+            provider: "fixture-backup",
+            key: "third-fixture-key",
+          },
+        },
+      });
+      const fixture = probeFixture({ failedProfiles: ["fixture-backup:first"] });
+      const result = await verifySystemAgentInferenceWithFallback({
+        requestingAgentId: "main",
+        runtime,
+        deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+      });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) {
+        throw new Error(result.error);
+      }
+      expect(fixture.attempts.map(({ profile }) => profile)).toEqual([
+        undefined,
+        "fixture-backup:first",
+        "fixture-third:second",
+      ]);
+      expect(result.binding.execution.fallbackModelRef).toBe(second);
     });
   });
 
