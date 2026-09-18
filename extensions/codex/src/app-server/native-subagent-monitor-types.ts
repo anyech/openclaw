@@ -146,7 +146,6 @@ export type KnownChild = {
 
 export type ChildAssistantMessages = {
   texts: Map<string, string>;
-  order: string[];
   commentaryIds: Set<string>;
   finalMessageIds: Set<string>;
 };

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { subagentRuns } from "../agents/subagents/registry/subagent-registry-memory.js";
@@ -10,7 +11,9 @@ import { createAgentHarnessTaskRuntime } from "../plugin-sdk/agent-harness-task-
 import {
   markGatewayRestartDraining,
   resetGatewayWorkAdmission,
+  tryBeginGatewayRootWorkAdmission,
 } from "../process/gateway-work-admission.js";
+import { AsyncWorkScope, getAsyncWorkSignal } from "../shared/async-work-scope.js";
 import {
   createInMemoryTaskFlowRegistryStore,
   createInMemoryTaskRegistryStore,
@@ -25,6 +28,7 @@ import {
   markTaskTerminalById,
   updateTaskNotifyPolicyById,
 } from "./task-registry.js";
+import { clearTaskProgressBatches } from "./task-registry.process-state.js";
 import { configureTaskRegistryRuntime } from "./task-registry.store.js";
 import type { TaskNotifyPolicy } from "./task-registry.types.js";
 import {
@@ -168,14 +172,32 @@ afterEach(() => {
 });
 
 describe("yielded subagent progress delivery", () => {
-  it("coalesces the yield handoff and child activity at the original audience without completing or waking the parent", async () => {
+  it("coalesces progress at the original audience after the yielded requester closes without completing or waking it", async () => {
     const first = child("First");
     vi.setSystemTime(Date.now() + 1);
     const second = child("Second");
     child("Quiet", "silent");
     // The slow tool starts before the parent yields and need not produce another event.
     tool(first.entry);
-    yieldParent();
+    const requester = new AsyncWorkScope();
+    const root = tryBeginGatewayRootWorkAdmission("test:yielded-requester");
+    if (!root) {
+      throw new Error("Expected admitted requester");
+    }
+    let requesterContext: ReturnType<typeof AsyncLocalStorage.snapshot>;
+    try {
+      requesterContext = await root.run(async () =>
+        requester.run(() => {
+          const context = AsyncLocalStorage.snapshot();
+          yieldParent();
+          return context;
+        }),
+      );
+    } finally {
+      root.release();
+      await requester.drain();
+    }
+    expect(requester.signal.aborted).toBe(true);
     for (let index = 0; index < 40; index++) {
       tool(second.entry, index);
     }
@@ -186,7 +208,11 @@ describe("yielded subagent progress delivery", () => {
     });
     await vi.advanceTimersByTimeAsync(14_999);
     expect(sendMessage).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
+    // Fake timers do not restore native timer ALS; the progress timer retains its yield owner.
+    await requesterContext(() => {
+      expect(getAsyncWorkSignal()).toBe(requester.signal);
+      return vi.advanceTimersByTimeAsync(1);
+    });
     expect(sendMessage).toHaveBeenCalledOnce();
     const message = sendMessage.mock.calls[0]![0];
     expect(message).toMatchObject({
@@ -471,6 +497,24 @@ describe("yield-authorized harness progress", () => {
       expect(stopped).toHaveBeenCalledOnce();
     },
   );
+
+  it("retires harness ownership when the registry clears progress batches", async () => {
+    const { runtime, task } = harness();
+    const stopped = vi.fn();
+    const progress = runtime.registerProgressOwner?.({
+      runIds: [task.runId!],
+      isCurrent: () => true,
+      onStopped: stopped,
+    });
+    progress?.notify();
+    clearTaskProgressBatches();
+    expect(stopped).toHaveBeenCalledOnce();
+    progress?.notify();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(stopped).toHaveBeenCalledOnce();
+    expect(getTaskById(task.taskId)?.status).toBe("running");
+  });
 
   it.each(["notify", "timer", "handoff"])(
     "releases an invalid nonterminal owner at %s",
