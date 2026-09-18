@@ -11,6 +11,10 @@ import {
 } from "../agents/execution-auth-binding.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveSystemAgentConfiguredRouteFromConfig as resolveSystemAgentConfiguredRouteFromConfigImpl } from "./inference-route.js";
+import {
+  verifySetupInference,
+  type ResolvePersistentApplyInferenceDeps,
+} from "./setup-inference-turn.js";
 import { resolvePersistentApplyInference as resolvePersistentApplyInferenceImpl } from "./setup-inference.js";
 import {
   installSystemAgentClaudeCliBackendTestFixture,
@@ -460,6 +464,70 @@ describe("verified OpenClaw inference binding", () => {
 
     resolveOwner.mockResolvedValue("replacement-owner");
     await expect(revalidate(binding, cliConfig, deps)).resolves.toBeNull();
+  });
+
+  it("reprobes the same configured fallback for an opaque owner at persistent apply", async () => {
+    const fallbackModelRef = "claude-cli/claude-opus-5";
+    const baseConfig: OpenClawConfig = {
+      agents: {
+        entries: {
+          ops: {
+            default: true,
+            model: { primary: "fixture-primary/first", fallbacks: [fallbackModelRef] },
+          },
+        },
+      },
+    };
+    const route = await resolveSystemAgentConfiguredRouteFromConfig(baseConfig, "ops", {
+      fallbackModelRef,
+    });
+    if (!route || route.runner !== "cli") {
+      throw new Error("missing configured CLI fallback");
+    }
+    const auth = {
+      runtimeOwnerFingerprint: "opaque-fallback-owner",
+      runtimeOwnerKind: "cli-runtime" as const,
+      runtimeOwnerId: "claude-cli",
+      ...cliRuntimeArtifactAuth,
+    };
+    const deps = {
+      ...configSnapshot(baseConfig),
+      ...pluginArtifactDeps(),
+      ...cliRuntimeArtifactDeps(),
+      resolveCliRuntimeOwnerFingerprint: async () => auth.runtimeOwnerFingerprint,
+    };
+    const binding = await createBinding(route, auth, deps);
+    const verifyBoundInference = vi.fn<
+      NonNullable<ResolvePersistentApplyInferenceDeps["verifyBoundInference"]>
+    >(async (params) => {
+      expect(params).toMatchObject({ agentId: "ops", fallbackModelRef });
+      return await verifySetupInference({
+        ...params,
+        bindSession: true,
+        deps: {
+          ...deps,
+          runCliAgent: async (input) => {
+            expect(input).toMatchObject({ provider: "claude-cli", model: "claude-opus-5" });
+            input.onSuccessfulAuthBinding?.(auth);
+            return {
+              meta: {
+                durationMs: 1,
+                finalAssistantVisibleText: "OK",
+                executionTrace: { winnerProvider: "claude-cli", winnerModel: "claude-opus-5" },
+              },
+            };
+          },
+        },
+      });
+    });
+    await expect(
+      resolvePersistentApplyInference({
+        binding,
+        runtime,
+        deps: { ...deps, verifyBoundInference },
+      }),
+    ).resolves.toBe(binding.execution);
+    expect(verifyBoundInference).toHaveBeenCalledOnce();
   });
 
   it("invalidates a strict CLI credential when its package artifact changes", async () => {
