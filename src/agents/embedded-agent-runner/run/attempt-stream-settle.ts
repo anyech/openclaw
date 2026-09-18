@@ -76,10 +76,10 @@ import {
   waitForCompactionRetryWithAggregateTimeout,
 } from "./compaction-retry-aggregate-timeout.js";
 import { selectCompactionTimeoutSnapshot } from "./compaction-timeout.js";
+import { CONTINUATION_PROMPT } from "./continuation-prompt.js";
 import { materializeProviderContext } from "./images.js";
 import type { EmbeddedRunAttemptInternalParams as EmbeddedRunAttemptParams } from "./internal-params.js";
 import { wrapStreamFnWithMessageTransform } from "./message-transform-stream-wrapper.js";
-import { CONTINUATION_PROMPT } from "./session-prompt-state.js";
 import type { EmbeddedRunAttemptResult } from "./types.js";
 
 /**
