@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelPlugin } from "../channels/plugins/types.public.js";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../config/runtime-snapshot.js";
+import type { ChannelStreamingConfig } from "../config/types.base.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
 import { loadBundledPluginFacade } from "../test-utils/bundled-plugin-public-surface.js";
 import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
@@ -7,6 +13,7 @@ import {
   publishTaskProgressMessage,
   type TaskProgressMessageState,
 } from "./task-progress-message.js";
+import { isTaskProgressEnabled } from "./task-registry-delivery-runtime.js";
 import type { TaskRegistryDeliveryRuntime } from "./task-registry-runtime-loaders.js";
 
 const { telegramPlugin } = await loadBundledPluginFacade<{ telegramPlugin: ChannelPlugin }>({
@@ -16,6 +23,146 @@ const { telegramPlugin } = await loadBundledPluginFacade<{ telegramPlugin: Chann
 const { msteamsPlugin } = await loadBundledPluginFacade<{ msteamsPlugin: ChannelPlugin }>({
   pluginId: "msteams",
   artifactBasename: "channel-plugin-api.js",
+});
+
+const { slackPlugin } = await loadBundledPluginFacade<{ slackPlugin: ChannelPlugin }>({
+  pluginId: "slack",
+  artifactBasename: "channel-plugin-api.js",
+});
+const { discordPlugin } = await loadBundledPluginFacade<{ discordPlugin: ChannelPlugin }>({
+  pluginId: "discord",
+  artifactBasename: "channel-plugin-api.js",
+});
+
+describe("task progress preferences", () => {
+  beforeEach(() => {
+    setActivePluginRegistry(
+      createTestRegistry(
+        [slackPlugin, telegramPlugin, discordPlugin, msteamsPlugin].map((plugin) => ({
+          pluginId: plugin.id,
+          source: "test",
+          plugin,
+        })),
+      ),
+    );
+  });
+  afterEach(() => {
+    clearRuntimeConfigSnapshot();
+    setActivePluginRegistry(createTestRegistry([]));
+  });
+
+  function configure(
+    channel: string,
+    streaming?: ChannelStreamingConfig,
+    accountStreaming?: ChannelStreamingConfig,
+  ) {
+    const cfg: OpenClawConfig = {
+      channels: {
+        [channel]: {
+          streaming,
+          accounts: { work: accountStreaming === undefined ? {} : { streaming: accountStreaming } },
+        },
+      },
+    };
+    setRuntimeConfigSnapshot(cfg, cfg);
+  }
+
+  it.each(["slack", "telegram", "discord"])(
+    "keeps %s quiet without an explicit progress-tool opt-in",
+    (channel) => {
+      for (const streaming of [undefined, { mode: "progress" as const }]) {
+        configure(channel, streaming);
+        expect(isTaskProgressEnabled(channel, "work")).toBe(false);
+      }
+      for (const mode of ["off", "partial", "block"] as const) {
+        configure(channel, { mode, progress: { toolProgress: true } });
+        expect(isTaskProgressEnabled(channel, "work")).toBe(false);
+      }
+      configure(channel, { mode: "progress", progress: { toolProgress: true } });
+      expect(isTaskProgressEnabled(channel, "work")).toBe(true);
+      configure(channel, { mode: "progress", preview: { toolProgress: true } });
+      expect(isTaskProgressEnabled(channel, "work")).toBe(true);
+    },
+  );
+
+  it.each([true, false])("preserves Slack's inherited toolProgress=%s", (toolProgress) => {
+    configure("slack", { mode: "progress", progress: { toolProgress } }, { mode: "progress" });
+    expect(isTaskProgressEnabled("slack", "work")).toBe(toolProgress);
+    configure(
+      "slack",
+      { mode: "progress", progress: { toolProgress } },
+      { progress: { label: "Working" } },
+    );
+    expect(isTaskProgressEnabled("slack", "work")).toBe(toolProgress);
+  });
+
+  it.each(["slack", "telegram", "discord"])(
+    "honors explicit %s account overrides and observes later opt-out",
+    (channel) => {
+      configure(
+        channel,
+        { mode: "progress", progress: { toolProgress: false } },
+        { mode: "progress", progress: { toolProgress: true } },
+      );
+      expect(isTaskProgressEnabled(channel, "work")).toBe(true);
+      configure(
+        channel,
+        { mode: "progress", progress: { toolProgress: true } },
+        { mode: "progress", progress: { toolProgress: false } },
+      );
+      expect(isTaskProgressEnabled(channel, "work")).toBe(false);
+    },
+  );
+
+  it("preserves Teams' explicit top-level preference without assuming an account config shape", () => {
+    for (const toolProgress of [undefined, false, true]) {
+      const cfg: OpenClawConfig = {
+        channels: { msteams: { streaming: { mode: "progress", progress: { toolProgress } } } },
+      };
+      setRuntimeConfigSnapshot(cfg, cfg);
+      expect(isTaskProgressEnabled("msteams", "default")).toBe(toolProgress === true);
+    }
+  });
+
+  it("does not reconstruct account overrides for metadata-only channel owners", () => {
+    const plugin = createChannelTestPluginBase({ id: "metadata-only", label: "Metadata only" });
+    setActivePluginRegistry(createTestRegistry([{ pluginId: plugin.id, source: "test", plugin }]));
+    configure(
+      plugin.id,
+      { mode: "progress", progress: { toolProgress: true } },
+      { progress: { toolProgress: false } },
+    );
+    expect(isTaskProgressEnabled(plugin.id, "work")).toBe(false);
+  });
+
+  it.each([{}, null])(
+    "does not replace an owner's explicit config projection (%j) with root settings",
+    (config) => {
+      const plugin = createChannelTestPluginBase({
+        id: "projected",
+        label: "Projected",
+        config: { resolveAccount: () => ({ config }) },
+      });
+      setActivePluginRegistry(
+        createTestRegistry([{ pluginId: plugin.id, source: "test", plugin }]),
+      );
+      const cfg: OpenClawConfig = {
+        channels: {
+          [plugin.id]: { streaming: { mode: "progress", progress: { toolProgress: true } } },
+        },
+      };
+      setRuntimeConfigSnapshot(cfg, cfg);
+      expect(isTaskProgressEnabled(plugin.id, "default")).toBe(false);
+    },
+  );
+
+  it("does not infer an enabled preference without a registered channel owner", () => {
+    configure("slack", { mode: "progress", progress: { toolProgress: true } });
+    setActivePluginRegistry(createTestRegistry([]));
+    expect(isTaskProgressEnabled("slack", "work")).toBe(false);
+    expect(isTaskProgressEnabled(undefined, "work")).toBe(false);
+    expect(isTaskProgressEnabled("slack", undefined)).toBe(false);
+  });
 });
 
 const params = {

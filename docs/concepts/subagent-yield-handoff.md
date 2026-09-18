@@ -136,8 +136,9 @@ continues to own the final result.
 Native Codex children keep their existing completion owner and silent task-mirror
 policy. When a parent successfully yields, its retained native monitor can hand
 progress presentation to the existing task publisher. This requires the originating
-channel account to use `streaming.mode: "progress"` with tool progress enabled.
-A normal parent exit does not authorize background progress.
+channel account to use `streaming.mode: "progress"` with tool progress explicitly
+enabled. The registered channel owns account inheritance; unset or disabled tool
+progress stays quiet. A normal parent exit does not authorize background progress.
 
 The publisher creates one bounded activity snapshot and updates the same message
 where the channel supports message editing. It shows task labels, observed tools

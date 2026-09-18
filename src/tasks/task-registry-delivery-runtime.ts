@@ -1,9 +1,9 @@
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import { resolveChannelPluginRegistration } from "../channels/plugins/registry.js";
 import {
   resolveChannelPreviewStreamMode,
   resolveChannelStreamingPreviewToolProgress,
 } from "../channels/streaming.js";
-import { resolveMergedAccountConfig } from "../config/channel-account-config.js";
 import { resolveChannelConfigRecord } from "../config/channel-configured-shared.js";
 import { resolveControlUiSessionUrl } from "../config/control-ui-link-base.js";
 import { resolveMessageActionOutcome } from "../infra/outbound/message-action-contracts.js";
@@ -22,22 +22,18 @@ export function isTaskProgressEnabled(
   if (!channel || !accountId) {
     return false;
   }
-  const channelConfig = resolveChannelConfigRecord(getRuntimeConfig(), channel) ?? undefined;
-  const accountRecords = asOptionalRecord(channelConfig?.accounts);
-  const accounts = accountRecords
-    ? Object.fromEntries(
-        Object.entries(accountRecords).map(([id, value]) => [id, asOptionalRecord(value) ?? {}]),
-      )
-    : undefined;
-  const entry = resolveMergedAccountConfig({
-    channelConfig,
-    accounts,
-    accountId,
-    channelId: channel,
-  });
-  const streaming = { streaming: entry.streaming };
+  // The registered channel owns account inheritance; do not recreate its merge policy here.
+  const plugin = resolveChannelPluginRegistration(channel, { loadedOnly: true })?.plugin;
+  const cfg = getRuntimeConfig();
+  const account = asOptionalRecord(plugin?.config.resolveAccount(cfg, accountId));
+  const root = resolveChannelConfigRecord(cfg, channel);
+  // Top-level owners can return metadata only. Never merge or infer account overrides.
+  const entry =
+    asOptionalRecord(account?.config) ??
+    (account && !("config" in account) && root?.accounts === undefined ? root : undefined);
+  const streaming = { streaming: entry?.streaming };
   const mode = resolveChannelPreviewStreamMode(streaming, "off");
-  return mode === "progress" && resolveChannelStreamingPreviewToolProgress(streaming, true, mode);
+  return mode === "progress" && resolveChannelStreamingPreviewToolProgress(streaming, false, mode);
 }
 
 export async function editTaskProgressMessage(
