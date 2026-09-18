@@ -53,6 +53,18 @@ type SystemAgentRouteProjectionDeps = Pick<
   "loadAuthProfileStoreForRuntime" | "pluginMetadataPlugins" | "modelTarget" | "fallbackModelRef"
 >;
 
+/** Carry the selected role/candidate through every ownership projection and recheck. */
+export function systemAgentRouteOptions(
+  selection: Pick<SystemAgentConfiguredRoute, "modelTarget" | "fallbackModelRef">,
+  deps: SystemAgentRouteProjectionDeps = {},
+): SystemAgentRouteProjectionDeps {
+  return {
+    ...deps,
+    modelTarget: selection.modelTarget,
+    fallbackModelRef: selection.fallbackModelRef,
+  };
+}
+
 /** Keep ordinary fallback inheritance and ordering, including each reference's own profile. */
 export async function resolveSystemAgentConfiguredFallbackRefs(
   config: OpenClawConfig,
