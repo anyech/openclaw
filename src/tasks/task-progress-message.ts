@@ -1,4 +1,5 @@
 import { getChannelPlugin } from "../channels/plugins/registry.js";
+import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import type { TaskRegistryDeliveryRuntime } from "./task-registry-runtime-loaders.js";
 
 type ProgressSendParams = Parameters<TaskRegistryDeliveryRuntime["sendMessage"]>[0] & {
@@ -11,6 +12,8 @@ export type TaskProgressMessageTarget = {
   accountId: string;
   threadId?: string | number;
   messageId: string;
+  /** Original host-owned requester facts, never reconstructed from the send receipt. */
+  requesterOrigin: DeliveryContext;
 };
 
 /** Ephemeral presentation state, owned and bounded by the progress batch. */
@@ -55,6 +58,12 @@ export function publishTaskProgressMessage(
     }
     state.attempted = true;
     state.originKey = originKey;
+    const requesterOrigin: DeliveryContext = {
+      channel: params.channel,
+      to: params.to,
+      accountId: params.accountId,
+      threadId: params.threadId,
+    };
     const sent = await runtime.sendMessage(params);
     const result = sent.result;
     if (
@@ -82,6 +91,7 @@ export function publishTaskProgressMessage(
       accountId: params.accountId,
       threadId: result.receipt?.threadId ?? destination.threadId ?? params.threadId,
       messageId: result.messageId,
+      requesterOrigin,
     };
     state.content = params.content;
   };

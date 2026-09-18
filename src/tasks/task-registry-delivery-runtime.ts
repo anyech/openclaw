@@ -9,6 +9,7 @@ import { resolveControlUiSessionUrl } from "../config/control-ui-link-base.js";
 import { resolveMessageActionOutcome } from "../infra/outbound/message-action-contracts.js";
 import { runMessageAction } from "../infra/outbound/message-action-runner.js";
 import { getRuntimeConfig } from "../infra/outbound/message.config.runtime.js";
+import { normalizeMessageChannel } from "../utils/message-channel-normalize.js";
 import type { TaskProgressMessageTarget } from "./task-progress-message.js";
 
 // Runtime delivery seam for task terminal/state-change notifications.
@@ -59,6 +60,17 @@ export async function editTaskProgressMessage(
       message: params.content,
     },
     agentId: params.agentId,
+    requesterAccountId: params.requesterOrigin.accountId,
+    // Retained originating conversation under the live progress owner, not a new inbound turn.
+    // In particular, the outgoing receipt must never become a trusted currentMessageId.
+    toolContext: {
+      currentChannelProvider: normalizeMessageChannel(params.requesterOrigin.channel),
+      currentMessagingTarget: params.requesterOrigin.to,
+      currentThreadTs:
+        params.requesterOrigin.threadId === undefined
+          ? undefined
+          : String(params.requesterOrigin.threadId),
+    },
     gatewayOwnedDelivery: true,
     suppressTranscriptMirror: true,
     assertDirectAdapterHandoff: params.assertCurrent,
