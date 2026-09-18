@@ -182,6 +182,8 @@ export async function runSetupInferenceTurn(params: {
           : {}),
         authProfileStateMode: "read-only",
         allowAuthProfileFallback: false,
+        // Bound admission owns the ladder: a nested winner cannot replace this candidate.
+        ...(params.requireExecutionOwner ? { modelFallbacksOverride: [] } : {}),
         preparedModelRuntimeMode: "isolated-read-only",
         ...(harness === "codex" ? { cleanupBundleMcpOnRunEnd: true } : {}),
         ...(harness ? { agentHarnessRuntimeOverride: harness } : {}),
@@ -416,6 +418,7 @@ export async function revalidateStableSetupInferenceOwner(params: {
 type SetupInferenceRequestParams = {
   agentId?: string;
   modelTarget?: "utility";
+  fallbackModelRef?: string;
   runtime: RuntimeEnv;
   timeoutMs?: number;
   deps?: ActivateSetupInferenceDeps;
@@ -450,7 +453,10 @@ export async function verifySetupInference(
     return { ok: false, status: "format", error: invalidSetupConfigError(snapshot) };
   }
   const cfg: OpenClawConfig = snapshot.runtimeConfig ?? snapshot.config;
-  const routeOptions = { modelTarget: params.modelTarget };
+  const routeOptions = {
+    modelTarget: params.modelTarget,
+    fallbackModelRef: params.fallbackModelRef,
+  };
   const baselineRoute = await projectInferenceRoute(cfg, params.agentId, routeOptions);
   let verifiedBinding: SystemAgentVerifiedInferenceBinding | undefined;
   const verification = await verifySetupInferenceConfig({
@@ -466,6 +472,7 @@ export async function verifySetupInference(
     runtime: params.runtime,
     requireExecutionOwner: params.bindSession === true,
     ...(params.modelTarget ? { modelTarget: params.modelTarget } : {}),
+    ...(params.fallbackModelRef !== undefined ? { fallbackModelRef: params.fallbackModelRef } : {}),
     ...(params.agentId ? { agentId: params.agentId } : {}),
     ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     ...(params.deps ? { deps: params.deps } : {}),
@@ -512,6 +519,7 @@ type BoundSetupInferenceVerifier = (params: {
   runtime: RuntimeEnv;
   bindSession: true;
   agentId?: string;
+  fallbackModelRef?: string;
   deps?: ActivateSetupInferenceDeps;
 }) => Promise<BoundVerifySetupInferenceResult>;
 
@@ -557,6 +565,9 @@ export async function resolvePersistentApplyInference(params: {
     runtime: params.runtime,
     bindSession: true,
     agentId: params.binding.execution.agentId,
+    ...(params.binding.execution.fallbackModelRef !== undefined
+      ? { fallbackModelRef: params.binding.execution.fallbackModelRef }
+      : {}),
     deps,
   });
   if (
@@ -605,6 +616,7 @@ export async function verifySetupInferenceConfig(
     {
       loadAuthProfileStoreForRuntime: deps.loadAuthProfileStoreForRuntime,
       modelTarget: params.modelTarget,
+      fallbackModelRef: params.fallbackModelRef,
     },
     params.configSnapshot,
   );
@@ -621,7 +633,10 @@ export async function verifySetupInferenceConfig(
   const requireExecutionOwner =
     params.requireExecutionOwner === true || params.onVerifiedExecution !== undefined;
   const baselineRoute = requireExecutionOwner
-    ? await projectInferenceRoute(params.config, route.agentId, { modelTarget: params.modelTarget })
+    ? await projectInferenceRoute(params.config, route.agentId, {
+        modelTarget: params.modelTarget,
+        fallbackModelRef: params.fallbackModelRef,
+      })
     : undefined;
   let stagedOwnerPluginArtifacts: SystemAgentOwnerPluginArtifactSnapshot | undefined;
   if (requireExecutionOwner) {
@@ -663,6 +678,7 @@ export async function verifySetupInferenceConfig(
         {
           loadAuthProfileStoreForRuntime: deps.loadAuthProfileStoreForRuntime,
           modelTarget: params.modelTarget,
+          fallbackModelRef: params.fallbackModelRef,
         },
         currentSnapshot,
       );
@@ -672,6 +688,7 @@ export async function verifySetupInferenceConfig(
           baselineRoute!,
           await projectInferenceRoute(currentConfig, route.agentId, {
             modelTarget: params.modelTarget,
+            fallbackModelRef: params.fallbackModelRef,
           }),
         )
       ) {
@@ -687,7 +704,8 @@ export async function verifySetupInferenceConfig(
       });
       params.onVerifiedExecution?.(binding);
     } catch (error) {
-      return { ok: false, status: "auth", error: await redactSetupInferenceError(error) };
+      // A successful response followed by owner drift is not a retryable auth outage.
+      return { ok: false, status: "unknown", error: await redactSetupInferenceError(error) };
     }
   }
   return {

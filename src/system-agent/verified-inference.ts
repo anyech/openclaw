@@ -426,6 +426,7 @@ async function projectVerifiedExecutionFingerprint(
   const projection = await projectInferenceRoute(config, route.agentId, {
     ...deps,
     modelTarget: route.modelTarget,
+    fallbackModelRef: route.fallbackModelRef,
   });
   const { authProfileId: _authProfileId, ...routeIdentity } = projection.route ?? {};
   return {
@@ -890,7 +891,11 @@ async function resolveSystemAgentVerifiedInferenceStateInternal(
   const currentRoute = await resolveSystemAgentConfiguredRouteFromConfig(
     config,
     binding.execution.agentId,
-    deps,
+    {
+      ...deps,
+      modelTarget: binding.execution.modelTarget,
+      fallbackModelRef: binding.execution.fallbackModelRef,
+    },
     snapshot,
   );
   if (
