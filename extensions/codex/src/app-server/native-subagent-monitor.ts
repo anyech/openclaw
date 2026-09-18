@@ -32,7 +32,6 @@ import {
   defaultNativeSubagentMonitorRuntime,
 } from "./native-subagent-monitor-runtime.js";
 import type {
-  ChildAssistantMessages,
   ChildState,
   DirectSpawnEvidence,
   KnownChild,
@@ -610,7 +609,6 @@ class Monitor {
       this.turnObservation.emitChildTaskActivity(notification, childState);
     }
     if (!pendingNativeTurn) {
-      this.turnObservation.captureChildAssistantMessage(notification);
       await this.handleChildTurnCompletion(notification, childState);
     }
     if (
@@ -709,9 +707,6 @@ class Monitor {
         childState.childThreadId,
         "Codex child turn interrupted",
       );
-      if (turnId) {
-        childState.assistantMessagesByTurn.delete(turnId);
-      }
       this.settleResumableChild(childState);
       return;
     }
@@ -730,7 +725,6 @@ class Monitor {
       }
       this.releaseDirectChild(childState);
     }
-    this.turnObservation.captureChildTurnAssistantMessages(childState, turn);
     const completion = this.turnObservation.toChildTurnCompletion(childState, turn);
     if (!completion) {
       return;
@@ -1315,7 +1309,6 @@ class Monitor {
         parentThreadId,
         nativeParentThreadId: known?.nativeParentThreadId ?? parentThreadId,
         agentId: state.agentId,
-        assistantMessagesByTurn: new Map<string, ChildAssistantMessages>(),
         recoveryAttempt: 0,
         terminal: false,
         nativeCompletionDelivered: false,
@@ -1362,7 +1355,6 @@ class Monitor {
       childState.releaseDirectChild = claimDirectChild(childThreadId);
     }
     this.registerAgentPath(state, childThreadId, childThreadId);
-    state.mirror?.markAuthoritativeCompletionExpected(childThreadId);
     const agentPath = normalizeOptionalString(options.agentPath);
     if (agentPath) {
       this.registerAgentPath(state, childThreadId, agentPath);
