@@ -121,8 +121,8 @@ beforeEach(async () => {
     artifactBasename: "api.js",
   });
   const { setTelegramRuntime } = await loadBundledPluginFacade<
-    typeof import("../extensions/telegram/runtime-setter-api.js")
-  >({ pluginId: "telegram", artifactBasename: "runtime-setter-api.js" });
+    typeof import("../extensions/telegram/runtime-api.js")
+  >({ pluginId: "telegram", artifactBasename: "runtime-api.js" });
   const builder = createPluginRegistry({
     runtime: createPluginRuntime(),
     logger: { info() {}, warn() {}, error() {}, debug() {} },
