@@ -10,6 +10,7 @@ import { unwrapSessionTranscriptWorkerReply } from "./session-history-worker-err
 import { resolveSessionTranscriptReadFence } from "./session-transcript-read-fence.js";
 import type {
   SessionBranchSummaryWorkerInput,
+  SessionContextMessagesWorkerInput,
   SessionEntryWorkerInput,
   SessionModelContextWorkerInput,
   SessionSqliteTargetWorkerInput,
@@ -24,8 +25,10 @@ function prepareSqliteReadWorker() {
 
 const workerUrl = resolveRuntimeWorkerUrl(runtimeProcessEntrypoints.sessionTranscript);
 const modelContextReads = new WorkerTaskPool<
-  SessionModelContextWorkerInput | SessionSqliteTargetWorkerInput,
-  SessionTranscriptWorkerReply<"model-context" | "sqlite-target">
+  | SessionModelContextWorkerInput
+  | SessionSqliteTargetWorkerInput
+  | SessionContextMessagesWorkerInput,
+  SessionTranscriptWorkerReply<"model-context" | "sqlite-target" | "context-messages">
 >({
   workerUrl,
   prepareWorker: prepareSqliteReadWorker,
@@ -66,7 +69,7 @@ export async function readSessionTranscriptModelContextAsync(
   limits?: SessionModelContextWorkerInput["limits"],
 ): Promise<ReturnType<typeof readSessionTranscriptModelContext>> {
   signal?.throwIfAborted();
-  const value = unwrapSessionTranscriptWorkerReply<"model-context" | "sqlite-target">(
+  const value = unwrapSessionTranscriptWorkerReply(
     await modelContextReads.run(
       { kind: "model-context", target, admission, through, limits },
       { timeoutMs: 60_000, signal },
@@ -78,12 +81,27 @@ export async function readSessionTranscriptModelContextAsync(
   return value;
 }
 
+export async function readSessionTranscriptContextMessagesAsync(
+  target: SessionTranscriptRuntimeTarget,
+  limits: SessionContextMessagesWorkerInput["limits"],
+  admission?: SessionContextMessagesWorkerInput["admission"],
+  signal?: AbortSignal,
+) {
+  signal?.throwIfAborted();
+  return unwrapSessionTranscriptWorkerReply<"context-messages">(
+    (await modelContextReads.run(
+      { kind: "context-messages", target, admission, limits },
+      { timeoutMs: 60_000, signal },
+    )) as SessionTranscriptWorkerReply<"context-messages">, // SAFETY: The request discriminant selects this reply value.
+  );
+}
+
 export async function resolveSessionSqliteTargetInWorker(
   input: Omit<SessionSqliteTargetWorkerInput, "kind">,
   signal?: AbortSignal,
 ) {
   signal?.throwIfAborted();
-  const value = unwrapSessionTranscriptWorkerReply<"model-context" | "sqlite-target">(
+  const value = unwrapSessionTranscriptWorkerReply(
     await modelContextReads.run(
       { kind: "sqlite-target", ...input },
       { inputBytes: JSON.stringify(input).length * 2, timeoutMs: 60_000, signal },
