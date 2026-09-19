@@ -45,6 +45,7 @@ import {
 } from "./provider-http-errors.js";
 import type { ProviderLocalServiceLease } from "./provider-local-service-target.js";
 import { ensureModelProviderLocalService } from "./provider-local-service.js";
+import { getProviderRequestAuthority } from "./provider-request-authority.js";
 import {
   buildProviderRequestDispatcherPolicy,
   getModelProviderRequestRouteFacts,
@@ -793,6 +794,8 @@ export function buildGuardedModelFetch(
   const dispatcherPolicy = buildProviderRequestDispatcherPolicy(requestConfig);
   const requestTimeoutMs = resolveModelRequestTimeoutMs(model, timeoutMs);
   return async (input, init) => {
+    const assertCurrent = getProviderRequestAuthority();
+    assertCurrent?.();
     let localServiceLease: ProviderLocalServiceLease | undefined;
     const request = input instanceof Request ? new Request(input, init) : undefined;
     const rawUrl =
@@ -835,6 +838,7 @@ export function buildGuardedModelFetch(
     const localServiceSignal = buildModelRequestSignal(baseSignal, requestTimeoutMs);
     const guardedFetchOptions = {
       url,
+      ...(assertCurrent ? { beforeRequest: assertCurrent } : {}),
       init: baseInit,
       capture: {
         meta: {
