@@ -14,6 +14,7 @@ import { createAgentHarnessTaskRuntime } from "../src/plugin-sdk/agent-harness-t
 import { resolveStorePath, upsertSessionEntry } from "../src/plugin-sdk/session-store-runtime.js";
 import { setActivePluginRegistry } from "../src/plugins/runtime.js";
 import { resetGatewayWorkAdmission } from "../src/process/gateway-work-admission.js";
+import { closeOpenClawStateDatabaseAsync } from "../src/state/openclaw-state-db.js";
 import { createAgentHarnessTaskRuntimeScope } from "../src/tasks/agent-harness-task-runtime-scope.js";
 import { listTaskRecords } from "../src/tasks/runtime-internal.js";
 import { taskProgressBatches } from "../src/tasks/task-registry-state.js";
@@ -103,6 +104,8 @@ beforeEach(async () => {
 });
 fixture.setupNativeYieldChannelProofHooks();
 afterEach(async () => {
+  // Retire async SQLite owners before synchronous registry reset invalidates their admission.
+  await closeOpenClawStateDatabaseAsync();
   resetTaskRegistryForTests({ persist: false });
   resetTaskRegistryDeliveryRuntimeForTests();
   clearRuntimeConfigSnapshot();
