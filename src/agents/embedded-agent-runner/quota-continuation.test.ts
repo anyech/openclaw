@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { getAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
 import { attachRuntimePromptMediaFacts } from "../../media/media-facts.js";
-import * as providerRuntime from "../../plugins/provider-runtime.js";
+import { prepareProviderRuntimeAuth } from "../../plugins/provider-runtime.js";
 import { createOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { prepareSystemAgentRunAdmission } from "../admitted-run-context.js";
 import type { AgentMessage } from "../runtime/index.js";
@@ -35,6 +35,8 @@ import { createEmbeddedRunLaneController } from "./run/lane-controller.js";
 import { createEmbeddedRunProgressController } from "./run/progress-controller.js";
 import { createQuotaContinuationBudget } from "./run/quota-continuation-budget.js";
 import type { EmbeddedAgentRunResult } from "./types.js";
+
+vi.mock("../../plugins/provider-runtime.js", { spy: true });
 
 vi.mock("../harness/runtime-plugin.js", () => ({
   ensureSelectedAgentHarnessPlugin: async () => undefined,
@@ -616,7 +618,7 @@ it("stops prepared runtime auth refresh when quota admission expires before loop
     return { apiKey: "fixture-runtime-key", expiresAt: Date.now() + 120_000 };
   });
   // The external credential exchange is synthetic; runtime preparation and its timer owner are real.
-  vi.spyOn(providerRuntime, "prepareProviderRuntimeAuth").mockImplementation(prepareRuntimeAuth);
+  vi.mocked(prepareProviderRuntimeAuth).mockImplementation(prepareRuntimeAuth);
   publishCurrentModelGeneration(generation);
   await state.writeAuthProfiles({
     version: 1,
