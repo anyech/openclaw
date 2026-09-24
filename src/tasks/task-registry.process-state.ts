@@ -6,6 +6,7 @@ import type { SubagentRunRecord } from "../agents/subagents/registry/subagent-re
 import type { GetReplyOptions } from "../auto-reply/get-reply-options.types.js";
 import type { OpenClawStateDatabaseReadAdmission } from "../state/openclaw-state-db-async-lifecycle.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
+import type { TaskProgressMessageState } from "./task-progress-message.js";
 import type { TaskAgentEventTarget } from "./task-registry-agent-event-target.js";
 import {
   getTaskRelatedSessionIndexKeys,
@@ -116,6 +117,17 @@ export type TaskProgressBatch = {
   revision: number;
   timer?: ReturnType<typeof setTimeout>;
   publication?: Promise<void>;
+  message?: TaskProgressMessageState;
+  harness?: {
+    readTasks: () => TaskRecord[];
+    isCurrent: () => boolean;
+    owner: {
+      agentId?: string;
+      sessionKey: string;
+      requesterOrigin: TaskDeliveryState["requesterOrigin"];
+    };
+    stop: () => void;
+  };
 };
 
 export type TaskRegistryEventMutations = {
@@ -197,6 +209,7 @@ export function clearTaskProgressBatches(): void {
   for (const batch of batches.values()) {
     clearTimeout(batch.timer);
     batch.abortController.abort();
+    batch.harness?.stop();
   }
   batches.clear();
 }

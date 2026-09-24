@@ -1,6 +1,9 @@
 // Resolves task runtime scope for agent harness launches.
 import type { GatewayContextResolver } from "../gateway/server-methods/types.js";
-import { bindGatewayContextResolver } from "../plugins/runtime/gateway-request-scope.js";
+import {
+  bindGatewayContextResolver,
+  getGatewayContextResolver,
+} from "../plugins/runtime/gateway-request-scope.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 
@@ -25,12 +28,16 @@ function getScopeRegistry(): ScopeRegistry {
 
 export type AgentHarnessTaskRuntimeScope = {
   readonly requesterSessionKey: string;
+  readonly requesterSessionId?: string;
+  readonly requesterAgentId?: string;
   readonly requesterOrigin?: DeliveryContext;
 };
 
 /** Creates a host-issued task runtime scope for agent harness task execution. */
 export function createAgentHarnessTaskRuntimeScope(params: {
   requesterSessionKey: string;
+  requesterSessionId?: string;
+  requesterAgentId?: string;
   requesterOrigin?: DeliveryContext;
   gatewayContextResolver?: GatewayContextResolver;
 }): AgentHarnessTaskRuntimeScope {
@@ -41,11 +48,46 @@ export function createAgentHarnessTaskRuntimeScope(params: {
   const requesterOrigin = normalizeDeliveryContext(params.requesterOrigin);
   const scope: AgentHarnessTaskRuntimeScope = {
     requesterSessionKey,
+    ...(params.requesterSessionId?.trim()
+      ? { requesterSessionId: params.requesterSessionId.trim() }
+      : {}),
+    ...(params.requesterAgentId?.trim()
+      ? { requesterAgentId: params.requesterAgentId.trim() }
+      : {}),
     ...(requesterOrigin ? { requesterOrigin } : {}),
   };
   getScopeRegistry().hostIssuedScopes.add(scope);
   bindGatewayContextResolver(scope, params.gatewayContextResolver);
   return scope;
+}
+
+/** Issues the scope for an embedded run, capturing its requester delivery origin. */
+export function createRunTaskRuntimeScope(
+  requesterSessionKey: string,
+  params: {
+    requesterSessionId?: string;
+    requesterAgentId?: string;
+    messageChannel?: string;
+    messageProvider?: string;
+    agentAccountId?: string;
+    messageTo?: string;
+    messageThreadId?: string | number;
+    admittedRunContext?: object;
+  },
+): AgentHarnessTaskRuntimeScope {
+  return createAgentHarnessTaskRuntimeScope({
+    requesterSessionKey,
+    requesterSessionId: params.requesterSessionId,
+    requesterAgentId: params.requesterAgentId,
+    requesterOrigin: {
+      channel: params.messageChannel ?? params.messageProvider,
+      accountId: params.agentAccountId,
+      to: params.messageTo,
+      threadId: params.messageThreadId,
+    },
+    gatewayContextResolver:
+      params.admittedRunContext && getGatewayContextResolver(params.admittedRunContext),
+  });
 }
 
 export function assertAgentHarnessTaskRuntimeScope(
