@@ -1,12 +1,14 @@
 import type { ModelCostConfig } from "@openclaw/llm-core";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { materializeSessionArchiveForRead } from "../config/sessions/archive-compression.js";
+import { isInternalSessionEffectsKey } from "../config/sessions/internal-session-key.js";
 import type { SqliteSessionFileMarker } from "../config/sessions/legacy-sqlite-marker.js";
 import {
   listSessionTranscriptInstances,
   readTranscriptStatsBatchReadOnlySync,
 } from "../config/sessions/session-accessor.js";
 import type { SessionTranscriptStats } from "../config/sessions/session-accessor.sqlite-contract.js";
+import { sessionTranscriptEventsOverlapRange } from "../config/sessions/session-accessor.sqlite-event-time.js";
 import {
   getSessionKysely,
   resolveSqliteReadScope,
@@ -14,6 +16,7 @@ import {
 } from "../config/sessions/session-accessor.sqlite-scope.js";
 import { readHotSessionTranscriptSnapshot } from "../config/sessions/session-cold-storage-read.js";
 import { SessionTranscriptColdError } from "../config/sessions/session-cold-storage-state.js";
+import type { SessionTranscriptEventTimeRange } from "../config/sessions/transcript-event-time.js";
 import { transcriptEventJsonSql } from "../config/sessions/transcript-payload.js";
 import {
   openOpenClawAgentDatabaseReadOnly,
@@ -75,6 +78,21 @@ type ReadDatabase = <T>(
   read: () => T | Promise<T>,
 ) => Promise<T>;
 
+function boundedInventoryStartMs(startMs: number | undefined): number | undefined {
+  // An all-history request has no lower inventory bound and can safely prune missing sources.
+  return startMs !== undefined && startMs > 0 ? startMs : undefined;
+}
+
+function boundedInventoryEventTimeRange(
+  startMs: number | undefined,
+  endMs: number | undefined,
+): SessionTranscriptEventTimeRange | undefined {
+  const start = boundedInventoryStartMs(startMs);
+  return start === undefined
+    ? undefined
+    : { startMs: start, ...(endMs !== undefined ? { endMs } : {}) };
+}
+
 export async function executeUsageCostWorker(
   input: UsageCostWorkerInput,
   channel: WorkerTaskChannel,
@@ -111,7 +129,11 @@ export async function executeUsageCostWorker(
     }
     return owned;
   };
-  const readStore = <T>(agentId: string, storePath: string, read: () => T) => {
+  const readStore = <T>(
+    agentId: string,
+    storePath: string,
+    read: () => T | Promise<T>,
+  ): Promise<T> => {
     const database = target(agentId, storePath);
     if (isIncognitoOpenClawAgentSqlitePath(database.path, { agentId: database.agentId, env })) {
       throw new Error("Memory transcript reads require the host owner");
@@ -123,12 +145,15 @@ export async function executeUsageCostWorker(
     materializeArchive: (sourcePath) =>
       control.runNativeSection(() => materializeSessionArchiveForRead(sourcePath)),
     readSqliteMetadata: (storePath, read) => readStore(location.agentId, storePath, read),
-    listSqliteInstances: async (agentId, storePath) => {
+    listSqliteInstances: async (agentId, storePath, includeAllWindows) => {
       const database = target(agentId, storePath);
       return isIncognitoOpenClawAgentSqlitePath(database.path, { agentId: database.agentId, env })
-        ? host("memory-instances", { agentId, storePath })
+        ? host("memory-instances", { agentId, storePath, includeAllWindows })
         : readStore(agentId, storePath, () =>
-            listSessionTranscriptInstances({ agentId, storePath, env, projection: "list" }),
+            listSessionTranscriptInstances(
+              { agentId, storePath, env, projection: "list" },
+              { includeAllWindows },
+            ).filter((instance) => !isInternalSessionEffectsKey(instance.sessionKey)),
           );
     },
     readSqliteStats: async (markers) => {
@@ -161,13 +186,27 @@ export async function executeUsageCostWorker(
       }
       return result;
     },
+    preflightSqliteEventTime: async (marker, range, updatedAtMs) => {
+      const database = target(marker.agentId, marker.storePath);
+      if (
+        isIncognitoOpenClawAgentSqlitePath(database.path, {
+          agentId: database.agentId,
+          env,
+        })
+      ) {
+        return host("memory-event-time", { marker, range, updatedAtMs });
+      }
+      return readStore(marker.agentId, marker.storePath, () =>
+        sessionTranscriptEventsOverlapRange(marker, range, updatedAtMs, env),
+      );
+    },
   };
-  const inventory = (minMtimeMs?: number, sessionsDir?: string) =>
+  const inventory = (eventTimeRange?: SessionTranscriptEventTimeRange, sessionsDir?: string) =>
     listUsageCountedTranscriptStats(location.agentId, {
       ...access,
       storePath: location.storePath,
       sessionsDir,
-      minMtimeMs,
+      eventTimeRange,
     });
   if (operation.kind === "inventory") {
     const files = operation.sessionFiles
@@ -177,7 +216,7 @@ export async function executeUsageCostWorker(
       : await listUsageCountedTranscriptSources(location.agentId, {
           ...access,
           storePath: location.storePath,
-          minMtimeMs: operation.minMtimeMs,
+          eventTimeRange: operation.eventTimeRange,
         });
     return {
       kind: "inventory",
@@ -263,7 +302,7 @@ export async function executeUsageCostWorker(
       // not make a valid newer checkpoint appear ahead of this report's inventory.
       const reportFiles =
         operation.kind === "summary"
-          ? await inventory()
+          ? await inventory(boundedInventoryEventTimeRange(operation.startMs, operation.endMs))
           : await resolveUsageCostTranscriptFiles(
               operation.sessions.map((session) => session.sessionFile),
               access,
@@ -389,7 +428,11 @@ export async function executeUsageCostWorker(
   const rows = await readMetadata();
   const byPath = new Map(rows.map((row) => [row.key, row]));
 
-  const discovered = await inventory(undefined, operation.sessionsDir);
+  const inventoryStartMs = boundedInventoryStartMs(operation.startMs);
+  const discovered = await inventory(
+    boundedInventoryEventTimeRange(operation.startMs, operation.endMs),
+    operation.sessionsDir,
+  );
   const requestedFiles = (
     await resolveUsageCostTranscriptFiles(operation.sessionFiles ?? [], access)
   ).filter((file) => file !== undefined);
@@ -400,25 +443,24 @@ export async function executeUsageCostWorker(
   for (const file of requestedFiles) {
     filesByPath.set(file.filePath, file);
   }
-  for (const row of rows) {
-    if (filesByPath.has(row.key)) {
-      continue;
+  // A bounded inventory cannot decide whether older cache rows still have a source.
+  if (inventoryStartMs === undefined) {
+    for (const row of rows) {
+      if (filesByPath.has(row.key)) {
+        continue;
+      }
+      const bytes = new TextEncoder().encode(row.valueJson);
+      await host("prune-row", { key: row.key, value: bytes, updatedAt: row.updatedAt }, [
+        bytes.buffer,
+      ]);
     }
-    const bytes = new TextEncoder().encode(row.valueJson);
-    await host("prune-row", { key: row.key, value: bytes, updatedAt: row.updatedAt }, [
-      bytes.buffer,
-    ]);
+    await host("prune", {});
   }
-  await host("prune", {});
   const requestedPaths = new Set(requestedFiles.map((file) => file.filePath));
   const rebuildByPath = new Map(operation.rebuildRows?.map((row) => [row.key, row]));
   const stale = [];
   for (const file of filesByPath.values()) {
-    if (
-      requestedPaths.size > 0
-        ? !requestedPaths.has(file.filePath)
-        : operation.startMs !== undefined && file.mtimeMs < operation.startMs
-    ) {
+    if (requestedPaths.size > 0 && !requestedPaths.has(file.filePath)) {
       continue;
     }
     const row = byPath.get(file.filePath);

@@ -51,7 +51,14 @@ export async function discoverAllSessions(params: {
 }): Promise<DiscoveredSession[]> {
   const result = await runUsageCostWorker(prepareUsageCostWorker(params), {
     kind: "inventory",
-    minMtimeMs: params.startMs,
+    ...(params.startMs !== undefined && params.startMs > 0
+      ? {
+          eventTimeRange: {
+            startMs: params.startMs,
+            ...(params.endMs !== undefined ? { endMs: params.endMs } : {}),
+          },
+        }
+      : {}),
   });
   if (result.kind !== "inventory") {
     throw new Error("Usage worker returned an invalid session inventory");
@@ -60,7 +67,7 @@ export async function discoverAllSessions(params: {
   const discovered = new Map<string, DiscoveredSession>();
 
   for (const file of result.files) {
-    // Do not exclude by endMs: a session can have activity in range even if it continued later.
+    // Event-time inventory keeps any source with activity in-range even if the session continued later.
     const { sourcePath: sessionFile, sessionId } = file;
     if (!sessionId) {
       continue;
