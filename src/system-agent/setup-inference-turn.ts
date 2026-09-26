@@ -49,8 +49,6 @@ import {
   SETUP_INFERENCE_TEST_TIMEOUT_MS,
   SetupInferenceCancelledError,
   type SetupInferenceFailureStatus,
-  type SetupTurnFailure,
-  type SetupTurnSuccess,
   SetupInferenceOwnerDriftError,
   setupInferenceLog,
   type VerifySetupInferenceResult,
