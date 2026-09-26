@@ -68,6 +68,7 @@ export async function createNativeYieldChannelProof(params: {
     attempt,
     resolveStorePath(undefined, { agentId: "main" }),
     "proof-session",
+    params.scope.requesterLifecycleRevision,
   );
   // This composed scenario includes measured cold preparation (~12 s), unlike the 5 s unit fixture.
   attempt.timeoutMs = 60_000;
@@ -75,7 +76,9 @@ export async function createNativeYieldChannelProof(params: {
   attempt.runtimePlan = createCodexRuntimePlanFixture();
   attempt.agentHarnessTaskRuntimeScope = params.scope;
   setCodexTestModelSupportsTools(attempt, true);
-  const host = await createAdmittedHostCapabilityTestFixture(attempt);
+  const host = await createAdmittedHostCapabilityTestFixture(attempt, {
+    nativeModelPolicySupport: "exact",
+  });
   attempt.hostCapabilities = host.hostCapabilities;
   onTestFinished(() => {
     host.closeHost();

@@ -193,6 +193,7 @@ async function start() {
     scope: createAgentHarnessTaskRuntimeScope({
       requesterSessionKey: sessionKey,
       requesterSessionId: sessionId,
+      requesterLifecycleRevision: "original",
       requesterAgentId: "main",
       requesterOrigin: origin,
     }),

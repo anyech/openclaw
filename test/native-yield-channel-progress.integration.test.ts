@@ -9,7 +9,11 @@ import {
   setRuntimeConfigSnapshot,
 } from "../src/config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../src/config/types.openclaw.js";
-import { registerAgentRunContext, clearAgentRunContext } from "../src/infra/agent-run-registry.js";
+import {
+  claimAgentRunContext,
+  registerAgentRunContext,
+  clearAgentRunContext,
+} from "../src/infra/agent-run-registry.js";
 import { createAgentHarnessTaskRuntime } from "../src/plugin-sdk/agent-harness-task-runtime.js";
 import { resolveStorePath, upsertSessionEntry } from "../src/plugin-sdk/session-store-runtime.js";
 import { setActivePluginRegistry } from "../src/plugins/runtime.js";
@@ -154,6 +158,7 @@ it("composes successful native yield through real publisher and Discord HTTP sen
       scope: createAgentHarnessTaskRuntimeScope({
         requesterSessionKey: foreignKey,
         requesterSessionId: "foreign-proof",
+        requesterLifecycleRevision: "foreign-revision",
         requesterAgentId: "main",
         requesterOrigin: { ...origin, to: "channel:423456789012345678" },
       }),
@@ -205,15 +210,27 @@ it("composes successful native yield through real publisher and Discord HTTP sen
 it.each([
   { transition: "resume", effect: "send" },
   { transition: "reset", effect: "send" },
+  { transition: "reclaim", effect: "send" },
+  { transition: "revision", effect: "send" },
   { transition: "resume", effect: "edit" },
   { transition: "reset", effect: "edit" },
+  { transition: "reclaim", effect: "edit" },
+  { transition: "revision", effect: "edit" },
 ] as const)(
   "revokes composed native progress after $transition before $effect",
   async ({ transition, effect }) => {
+    if (transition === "reclaim") {
+      registerAgentRunContext("same-id-parent-turn", {
+        sessionKey,
+        sessionId: "proof-session",
+        agentId: "main",
+      });
+    }
     const native = await fixture.createNativeYieldChannelProof({
       scope: createAgentHarnessTaskRuntimeScope({
         requesterSessionKey: sessionKey,
         requesterSessionId: "proof-session",
+        requesterLifecycleRevision: "proof-revision",
         requesterAgentId: "main",
         requesterOrigin: origin,
       }),
@@ -240,7 +257,13 @@ it.each([
       }
       const previousEffects = effects().length;
       expect(taskProgressBatches.size).toBe(1);
-      if (transition === "resume") {
+      if (transition === "reclaim") {
+        claimAgentRunContext("same-id-parent-turn", {
+          sessionKey,
+          sessionId: native.sessionId,
+          agentId: "main",
+        });
+      } else if (transition === "resume") {
         registerAgentRunContext("new-native-parent-turn", {
           sessionKey,
           sessionId: native.sessionId,
@@ -253,9 +276,9 @@ it.each([
           sessionKey,
           storePath: resolveStorePath(undefined, { agentId: "main" }),
           entry: {
-            sessionId: "reset-proof-session",
+            sessionId: transition === "revision" ? native.sessionId : "reset-proof-session",
             updatedAt: Date.now(),
-            lifecycleRevision: "reset-proof",
+            lifecycleRevision: transition === "revision" ? "replaced-revision" : "reset-proof",
           },
         });
       }

@@ -29,6 +29,7 @@ function getScopeRegistry(): ScopeRegistry {
 export type AgentHarnessTaskRuntimeScope = {
   readonly requesterSessionKey: string;
   readonly requesterSessionId?: string;
+  readonly requesterLifecycleRevision?: string;
   readonly requesterAgentId?: string;
   readonly requesterOrigin?: DeliveryContext;
 };
@@ -37,6 +38,7 @@ export type AgentHarnessTaskRuntimeScope = {
 export function createAgentHarnessTaskRuntimeScope(params: {
   requesterSessionKey: string;
   requesterSessionId?: string;
+  requesterLifecycleRevision?: string;
   requesterAgentId?: string;
   requesterOrigin?: DeliveryContext;
   gatewayContextResolver?: GatewayContextResolver;
@@ -50,6 +52,9 @@ export function createAgentHarnessTaskRuntimeScope(params: {
     requesterSessionKey,
     ...(params.requesterSessionId?.trim()
       ? { requesterSessionId: params.requesterSessionId.trim() }
+      : {}),
+    ...(params.requesterLifecycleRevision?.trim()
+      ? { requesterLifecycleRevision: params.requesterLifecycleRevision.trim() }
       : {}),
     ...(params.requesterAgentId?.trim()
       ? { requesterAgentId: params.requesterAgentId.trim() }
@@ -66,6 +71,7 @@ export function createRunTaskRuntimeScope(
   requesterSessionKey: string,
   params: {
     requesterSessionId?: string;
+    requesterLifecycleRevision?: string;
     requesterAgentId?: string;
     messageChannel?: string;
     messageProvider?: string;
@@ -78,6 +84,7 @@ export function createRunTaskRuntimeScope(
   return createAgentHarnessTaskRuntimeScope({
     requesterSessionKey,
     requesterSessionId: params.requesterSessionId,
+    requesterLifecycleRevision: params.requesterLifecycleRevision,
     requesterAgentId: params.requesterAgentId,
     requesterOrigin: {
       channel: params.messageChannel ?? params.messageProvider,

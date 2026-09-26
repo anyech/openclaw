@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { loadRequesterSessionEntry } from "../agents/subagents/announce/subagent-announce-delivery.js";
 import {
+  claimAgentRunContext,
   clearAgentRunContext,
   registerAgentRunContext,
   resetAgentRunRegistryForTest,
@@ -31,6 +32,7 @@ vi.mock("../tasks/detached-task-runtime.js", () => ({
 
 const sessionKey = "agent:main:synthetic";
 const sessionId = "original";
+const lifecycleRevision = "revision-original";
 const agentId = "main";
 const stop: Array<() => void> = [];
 beforeEach(() => {
@@ -46,6 +48,7 @@ function register(
   scope = createAgentHarnessTaskRuntimeScope({
     requesterSessionKey: sessionKey,
     requesterSessionId: sessionId,
+    requesterLifecycleRevision: lifecycleRevision,
     requesterAgentId: agentId,
     requesterOrigin: { channel: "discord", to: "channel:synthetic" },
   }),
@@ -92,6 +95,16 @@ it("permanently retires post-yield progress on a requester run using another nat
   expect(onStopped).toHaveBeenCalledOnce();
 });
 
+it("retires on a new execution claim of the same requester run id", () => {
+  registerAgentRunContext("parent-run", { sessionKey, sessionId, agentId });
+  const { admitted, onStopped } = register();
+  const original = admitted?.isCurrent();
+  expect(original).toBe(true);
+  claimAgentRunContext("parent-run", { sessionKey, sessionId, agentId });
+  expect(admitted?.isCurrent()).toBe(false);
+  expect(onStopped).toHaveBeenCalledOnce();
+});
+
 it("ignores unrelated requester runs", () => {
   const { admitted, onStopped } = register();
   registerAgentRunContext("other-run", { sessionKey: "agent:main:other", agentId });
@@ -108,6 +121,25 @@ it("retires when requester entry facts identify a replacement session", () => {
       kind: "entry",
       previousSessionId: sessionId,
       sessionId: "replaced",
+      lifecycleRevision: "revision-replaced",
+      category: null,
+      clearMembers: false,
+    },
+  });
+  expect(admitted?.isCurrent()).toBe(false);
+  expect(onStopped).toHaveBeenCalledOnce();
+});
+
+it("retires on a same-id requester lifecycle replacement", () => {
+  const { admitted, onStopped } = register();
+  sessionChanges.emit({
+    sessionKey,
+    agentId,
+    facts: {
+      kind: "entry",
+      previousSessionId: sessionId,
+      sessionId,
+      lifecycleRevision: "revision-replaced",
       category: null,
       clearMembers: false,
     },
@@ -137,6 +169,7 @@ it("falls back to in-memory lifecycle checks for other requester-key facts", () 
       kind: "entry",
       previousSessionId: sessionId,
       sessionId,
+      lifecycleRevision,
       category: null,
       clearMembers: false,
     },
@@ -198,6 +231,7 @@ it("rejects progress registration for a foreign agent", () => {
     scope: createAgentHarnessTaskRuntimeScope({
       requesterSessionKey: sessionKey,
       requesterSessionId: sessionId,
+      requesterLifecycleRevision: lifecycleRevision,
       requesterAgentId: agentId,
     }),
   });

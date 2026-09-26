@@ -33,8 +33,14 @@ export function registerAgentHarnessTaskProgressOwner({
   progress: AgentHarnessProgressOwnerRequest;
 }) {
   const sessionId = scope.requesterSessionId;
+  const lifecycleRevision = scope.requesterLifecycleRevision;
   const agentId = scope.requesterAgentId;
-  if (!sessionId || !agentId || (progress.agentId && progress.agentId !== agentId)) {
+  if (
+    !sessionId ||
+    !lifecycleRevision ||
+    !agentId ||
+    (progress.agentId && progress.agentId !== agentId)
+  ) {
     return undefined;
   }
   const canonicalKey = resolveRequesterStoreKey(getRuntimeConfig(), requesterSessionKey, agentId);
@@ -43,7 +49,12 @@ export function registerAgentHarnessTaskProgressOwner({
     listAgentRunsForSession({ sessionKey: canonicalKey, sessionId }).filter(
       ({ runId }) => getAgentRunContext(runId)?.projectSessionLifecycle !== false,
     );
-  const originalRuns = new Map(readRuns().map(({ runId }) => [runId, getAgentRunContext(runId)]));
+  const originalRuns = new Map(
+    readRuns().map(({ runId }) => {
+      const context = getAgentRunContext(runId);
+      return [runId, { context, claimId: context?.executionClaimId }] as const;
+    }),
+  );
   let retired = false;
   let unsubscribe: (() => void) | undefined;
   // Host run registration, not a provider thread, owns requester resumption.
@@ -54,7 +65,11 @@ export function registerAgentHarnessTaskProgressOwner({
     }
     const valid =
       getAgentRunLifecycleGeneration() === lifecycleGeneration &&
-      readRuns().every(({ runId }) => originalRuns.get(runId) === getAgentRunContext(runId));
+      readRuns().every(({ runId }) => {
+        const original = originalRuns.get(runId);
+        const current = getAgentRunContext(runId);
+        return original?.context === current && original?.claimId === current?.executionClaimId;
+      });
     if (!valid) {
       retired = true;
     }
@@ -110,7 +125,9 @@ export function registerAgentHarnessTaskProgressOwner({
           : change.sessionKey === canonicalKey &&
             (change.factsInvalidated ||
               change.facts?.kind === "removed" ||
-              (change.facts?.kind === "entry" && change.facts.sessionId !== sessionId) ||
+              (change.facts?.kind === "entry" &&
+                (change.facts.sessionId !== sessionId ||
+                  change.facts.lifecycleRevision !== lifecycleRevision)) ||
               !isRequesterCurrent())
       ) {
         registration.dispose();

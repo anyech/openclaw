@@ -540,6 +540,7 @@ export async function prepareAndDispatchEmbeddedRunAttempt(input: {
           agentHarnessTaskRuntimeScope: createRunTaskRuntimeScope(params.sessionKey, {
             ...params,
             requesterSessionId: sessionId,
+            requesterLifecycleRevision: params.sessionTarget?.expectedLifecycleRevision,
             requesterAgentId: workspaceResolution.agentId,
           }),
         }

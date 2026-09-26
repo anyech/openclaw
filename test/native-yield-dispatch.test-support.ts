@@ -63,6 +63,12 @@ export async function captureNativeYieldDispatchScope(params: {
     agentId,
     runId,
     sessionId,
+    sessionTarget: {
+      agentId,
+      sessionId,
+      sessionKey: params.sessionKey,
+      expectedLifecycleRevision: "proof-revision",
+    },
     sessionFile: params.sessionKey,
     prompt: "Synthetic dispatch capture",
     timeoutMs: 5_000,
