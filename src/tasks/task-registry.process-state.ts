@@ -45,6 +45,7 @@ export type PendingTaskRegistryMutation = {
   published: Map<string, Omit<TaskRecord, "detail"> | undefined>;
   publication?: {
     records: Map<string, TaskRecord>;
+    deletions: Map<string, TaskRecord>;
     ready: Set<string>;
     invalidated: Set<string>;
   };
@@ -213,6 +214,16 @@ export function clearTaskProgressBatches(): void {
     batch.harness?.stop();
   }
   batches.clear();
+}
+
+export function clearTaskActivityOverlays(): void {
+  const activities = getTaskRegistryProcessState().taskActivityByTaskId;
+  for (const activity of activities.values()) {
+    if (activity.flushTimer) {
+      clearTimeout(activity.flushTimer);
+    }
+  }
+  activities.clear();
 }
 
 const indexState = getTaskRegistryProcessState();
@@ -538,7 +549,10 @@ export function recordTaskRegistryProjectionWrite(
     if (recovery && kind !== "delivery" && kind !== "refresh") {
       if (taskId === undefined) {
         recovery.replaced = true;
-        for (const id of publication?.records.keys() ?? []) {
+        for (const id of [
+          ...(publication?.records.keys() ?? []),
+          ...(publication?.deletions.keys() ?? []),
+        ]) {
           publication?.invalidated.add(id);
         }
       } else if (taskId === pending.scope.taskId) {
@@ -562,17 +576,23 @@ export function recordTaskRegistryProjectionWrite(
     if (!publication || kind === "delivery") {
       continue;
     }
-    for (const id of taskId === undefined ? publication.records.keys() : [taskId]) {
+    const publishedIds = [...publication.records.keys(), ...publication.deletions.keys()];
+    for (const id of taskId === undefined ? publishedIds : [taskId]) {
       // A predecessor's snapshot cannot supersede a receipt still waiting for its own read.
       const expected = publication.records.get(id);
+      const deletion = publication.deletions.has(id);
       if (
-        !expected ||
+        (!expected && !deletion) ||
         ((kind === "snapshot" || kind === "refresh") && !witness && !publication.ready.has(id))
       ) {
         continue;
       }
       const current = deleted ? undefined : indexState.tasks.get(id);
-      if (current === undefined || !isEquivalentTaskRecord(expected, current)) {
+      if (
+        deletion
+          ? current !== undefined || kind === "task"
+          : expected && (current === undefined || !isEquivalentTaskRecord(expected, current))
+      ) {
         publication.invalidated.add(id);
       }
     }

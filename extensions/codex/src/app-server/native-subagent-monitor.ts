@@ -32,6 +32,7 @@ import {
   CodexNativeSubagentHistoryRecovery,
   isNoFinalCompletion,
   readNativeTurnEnd,
+  readTurnCompletion,
   systemErrorFallbackCompletion,
 } from "./native-subagent-history-recovery.js";
 import {
@@ -513,7 +514,6 @@ class Monitor {
     }
   }
 
-  /** Handles one notification from the client-wide router observer. */
   private async handleNotification(notification: CodexServerNotification): Promise<void> {
     if (this.disposed) {
       return;
@@ -774,14 +774,13 @@ class Monitor {
       releaseNativeDirectChild(childState);
       releaseNativeModelExecution(childState);
     }
-    const completion = this.turnObservation.toChildTurnCompletion(childState, turn);
+    const completion = readTurnCompletion(turn, childState.childThreadId, "notification");
     if (!completion) {
       return;
     }
     await this.processObservedCompletion(state, childState, completion);
   }
 
-  /** Reads one child through app-server history and delivers a terminal result when present. */
   async reconcileChildThread(childThreadIdInput: string): Promise<boolean> {
     const childState = this.currentChild(childThreadIdInput.trim());
     return childState ? this.recovery.reconcileRegisteredChild(childState) : false;
@@ -2099,7 +2098,6 @@ class Monitor {
       candidates.set(assignment.runId, {
         expectedTask: captureAgentHarnessTaskAssignment(task),
         completionCustody: owner.completionCustody?.retain(),
-        taskId: task.taskId,
         runId: assignment.runId,
         nativeTurnId: assignment.nativeTurnId,
         terminal:
