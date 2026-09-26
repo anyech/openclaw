@@ -14,6 +14,7 @@ import {
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createEmptyPluginRegistry } from "../plugins/registry.js";
 import { ensureProfileForEmail } from "../state/user-profiles.js";
+import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { buildGatewayReloadPlan } from "./config-reload-plan.js";
 import { publishOperatorRoleConfigChange } from "./operator-role-policy.js";
@@ -21,6 +22,7 @@ import { captureGatewayOperatorRunAuthority } from "./operator-run-authority.js"
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import { createSyntheticPluginRuntimeClient } from "./server-plugin-runtime-client.js";
 import { startManagedGatewayConfigReloader } from "./server-reload-managed.js";
+import { SharedGatewaySessionGenerationState } from "./server-shared-auth-generation.js";
 import { createTestRuntimeSecretsActivator } from "./server-startup-config.test-support.js";
 
 const hoisted = vi.hoisted(() => ({
@@ -83,6 +85,7 @@ describe("startManagedGatewayConfigReloader hotReloadStatus plumbing", () => {
       mentionInbox: { invalidate: invalidateMentions },
     } as unknown as GatewayRequestContext;
     const reloader = startManagedGatewayConfigReloader({
+      scheduler: createTestGatewayScheduler(vi.isFakeTimers() ? "fake-timers" : undefined),
       getPluginRegistry: () => pluginRegistry,
       configRevisionProjector: {
         projectRawHash: (hash) => `opaque:${hash}`,
@@ -133,7 +136,10 @@ describe("startManagedGatewayConfigReloader hotReloadStatus plumbing", () => {
       channelManager: {} as never,
       activateRuntimeSecrets: createTestRuntimeSecretsActivator(),
       resolveSharedGatewaySessionGenerationForConfig: () => undefined,
-      sharedGatewaySessionGenerationState: { current: undefined, required: null },
+      sharedGatewaySessionGenerationState: new SharedGatewaySessionGenerationState({
+        current: undefined,
+        required: null,
+      }),
       prepareTerminalConfig: vi.fn(),
       reconcileRuntimePolicy: vi.fn(),
       commitRuntimePolicy: vi.fn(),
@@ -174,9 +180,9 @@ describe("startManagedGatewayConfigReloader hotReloadStatus plumbing", () => {
         "committed runtime config reader",
       );
       gatewayContext.resolveGatewayContext = () => gatewayContext;
-      const capture = () =>
+      const capture = async () =>
         expectDefined(
-          captureGatewayOperatorRunAuthority({
+          await captureGatewayOperatorRunAuthority({
             client: createSyntheticPluginRuntimeClient({
               scopes: ["operator.write"],
               operatorRoleActor: { kind: "operator", profileId: profile.id },
@@ -185,8 +191,8 @@ describe("startManagedGatewayConfigReloader hotReloadStatus plumbing", () => {
           }),
           "operator source",
         );
-      const original = capture();
-      let duringActivation: ReturnType<typeof capture> | undefined;
+      const original = await capture();
+      let duringActivation: Awaited<ReturnType<typeof capture>> | undefined;
       const candidate: OpenClawConfig = {
         ...initialConfig,
         gateway: {
@@ -202,7 +208,7 @@ describe("startManagedGatewayConfigReloader hotReloadStatus plumbing", () => {
         setRuntimeConfigSnapshot(candidate);
         expect(original.authority.signal?.aborted).toBe(false);
         expect(() => original.authority.assertCurrent()).not.toThrow();
-        duringActivation = capture();
+        duringActivation = await capture();
         // An unrelated Gateway publication cannot turn this tentative policy into source loss.
         publishOperatorRoleConfigChange({});
         expect(duringActivation.authority.signal?.aborted).toBe(false);

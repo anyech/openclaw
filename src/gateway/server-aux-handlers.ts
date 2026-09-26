@@ -16,6 +16,7 @@ import {
   resolveExecApprovalRequestAllowedDecisions,
   type ExecApprovalRequestPayload,
 } from "../infra/exec-approvals.js";
+import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import { resolveCanonicalPluginApprovalRequestAllowedDecisions } from "../infra/plugin-approval-canonical-decisions.js";
 import type { PluginApprovalRequestPayload } from "../infra/plugin-approvals.js";
 import {
@@ -76,6 +77,7 @@ type GatewayAuxHandlerLogger = {
 /** Create auxiliary gateway handlers that are not part of the core descriptor set. */
 export function createGatewayAuxHandlers(
   params: GatewaySecretsReloaderParams & {
+    scheduler: GatewayScheduler;
     log: GatewayAuxHandlerLogger;
     onApprovalLifecycle?: (event: OperatorApprovalLifecycleEvent) => void;
     onAgentRunAuthorityClosed?: (
@@ -118,6 +120,7 @@ export function createGatewayAuxHandlers(
     retainPlacementStandingGrant?: PlacementStandingGrantRuntime["retain"],
   ) =>
     new ExecApprovalManager<TPayload>({
+      scheduler: params.scheduler,
       approvalKind,
       persistence: approvalPersistence,
       resolveAudienceSessionKeys: resolveApprovalSessionAudienceWithFallback,
@@ -191,7 +194,9 @@ export function createGatewayAuxHandlers(
     },
     { cacheRejections: true },
   );
-  const questionManager = new QuestionManager();
+  const questionManager = new QuestionManager(() =>
+    params.log.warn?.("Question terminal publication failed; answer state retained."),
+  );
   const loadQuestionHandlers = createLazyPromise(
     async () => {
       const [{ createQuestionHandlers }, storeWriteService] = await Promise.all([
@@ -301,7 +306,7 @@ export function createGatewayAuxHandlers(
           );
         });
       }
-      questionManager.cancelClosedAuthorities();
+      questionManager.cancelClosedAuthorities(authority.operationalRunInstance);
       params.onAgentRunAuthorityClosed?.(authority, approvalReason);
     },
   );
@@ -317,7 +322,7 @@ export function createGatewayAuxHandlers(
           params.log.error?.(`${kind} approvals: worker-claim settlement failed: ${String(error)}`);
         });
       }
-      questionManager.cancelClosedAuthorities();
+      questionManager.cancelClosedAuthorities({ runId: claim.runId });
     },
   );
   const unregisterApprovalAuthorityObserver = () => {
@@ -428,6 +433,7 @@ export function createGatewayAuxHandlers(
           manager.retire();
         }
         questionManager.close();
+        await questionManager.drain();
         await Promise.all(approvalManagers.map((manager) => manager.drain()));
         await presentationWork.drain();
         await execApprovalForwarder.stop();
@@ -451,6 +457,8 @@ export function createGatewayAuxHandlers(
     cancelRunBoundApprovals,
     forwardPluginApprovalRequest: execApprovalForwarder.handlePluginApprovalRequested,
     forwardExecApprovalRequest: execApprovalForwarder.handleRequested,
+    forwardSystemAgentApprovalRequest: execApprovalForwarder.handleSystemAgentApprovalRequested,
+    forwardSystemAgentApprovalResolved: execApprovalForwarder.handleSystemAgentApprovalResolved,
     execApprovalIosPushDelivery,
     approvalWebPushDelivery,
     pluginApprovalIosPushDelivery,

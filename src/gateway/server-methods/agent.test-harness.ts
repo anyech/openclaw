@@ -1,12 +1,16 @@
 // Agent method tests cover run/steer/reset/wait behavior, task/subagent state,
 // approval followups, lifecycle hooks, and emitted gateway events.
+// Preserve module setup before modules that consume it.
+// oxfmt-ignore
+import {
+  resetSubagentRegistryMocks,
+  subagentRegistryMocks,
+} from "./agent.subagent-registry.mocks.test-support.js";
 import { expectDefined } from "@openclaw/normalization-core";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { expect, vi } from "vitest";
 import type { readAcpSessionMeta } from "../../acp/runtime/session-meta.js";
 import type { AgentInternalEvent } from "../../agents/internal-events.js";
-import { setSubagentRegistryDepsForTest } from "../../agents/subagents/registry/subagent-registry-deps.js";
-import type { SubagentRegistryDeps } from "../../agents/subagents/registry/subagent-registry-deps.js";
 import { resetSubagentRegistryForTests } from "../../agents/subagents/registry/subagent-registry.test-helpers.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import type {
@@ -27,7 +31,6 @@ import { captureEnv, setTestEnvValue } from "../../test-utils/env.js";
 import { installInMemoryTaskRegistryRuntime } from "../../test-utils/task-registry-runtime.js";
 import { createChatRunState } from "../server-chat-state.js";
 import { bindSessionRowProjection } from "../session-row-projection-access.js";
-import type { SessionRowProjection } from "../session-row-projection.js";
 import type { GatewaySessionRow } from "../session-utils.types.js";
 import {
   setDateOnlyFakeClockActive,
@@ -63,7 +66,7 @@ const mocks = vi.hoisted(() => ({
   patchSessionEntryTarget: vi.fn(),
   persistSessionTranscriptTurn: vi.fn(),
   stageSessionPendingInput: vi.fn<typeof stageSessionPendingInput>(),
-  recordSessionParticipant: vi.fn<typeof recordSessionParticipant>(() => "inserted"),
+  recordSessionParticipant: vi.fn<typeof recordSessionParticipant>(async () => "inserted"),
   listSessionParticipantsReadOnly: vi.fn<typeof listSessionParticipantsReadOnly>(() => new Map()),
   hasSessionTranscriptEventsSync: vi.fn<typeof hasSessionTranscriptEventsSync>(() => false),
   readTranscriptMutationStateSync: vi.fn<typeof readTranscriptMutationStateSync>(() => ({
@@ -100,8 +103,10 @@ const mocks = vi.hoisted(() => ({
   lifecycleGeneration: "test-generation",
 }));
 
+const agentTestMocks = Object.assign(mocks, subagentRegistryMocks);
+
 export function getAgentTestMocks() {
-  return mocks;
+  return agentTestMocks;
 }
 
 function resolveAgentTestConfig(cfg: OpenClawConfig = mocks.loadConfigReturn): OpenClawConfig {
@@ -293,26 +298,30 @@ vi.mock("../../agents/agent-scope.js", async () => {
       cfg?.agents?.list?.find((agent) => agent.id === agentId)?.workspace ??
       cfg?.agents?.defaults?.workspace ??
       "/tmp/workspace",
-    resolveAgentEffectiveModelPrimary: () => undefined,
+    resolveNativeModelPrimary: () => undefined,
   };
 });
 
-vi.mock("../../infra/agent-events.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../infra/agent-events.js")>()),
-  assertAgentRunLifecycleGenerationCurrent: (lifecycleGeneration: string) => {
-    if (lifecycleGeneration === mocks.lifecycleGeneration) {
-      return;
-    }
-    const error = new Error("Agent run belongs to a stale gateway lifecycle");
-    error.name = "AbortError";
-    throw error;
-  },
-  emitAgentEvent: mocks.emitAgentEvent,
-  getAgentEventLifecycleGeneration: () => mocks.lifecycleGeneration,
-  isAgentEventLifecycleGenerationCurrent: (generation: string) =>
-    generation === mocks.lifecycleGeneration,
-  registerAgentEventLifecycleRotationHandler: vi.fn(),
-}));
+vi.mock("../../infra/agent-events.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../infra/agent-events.js")>();
+  return {
+    ...actual,
+    assertAgentRunLifecycleGenerationCurrent: (lifecycleGeneration: string) => {
+      if (lifecycleGeneration === mocks.lifecycleGeneration) {
+        return;
+      }
+      const error = new Error("Agent run belongs to a stale gateway lifecycle");
+      error.name = "AbortError";
+      throw error;
+    },
+    emitAgentEvent: mocks.emitAgentEvent,
+    getAgentEventLifecycleGeneration: () => mocks.lifecycleGeneration,
+    isAgentEventLifecycleGenerationCurrent: (generation: string) =>
+      generation === mocks.lifecycleGeneration,
+    registerAgentEventLifecycleRotationHandler: vi.fn(),
+  };
+});
+
 vi.mock("../../infra/agent-run-registry.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../infra/agent-run-registry.js")>()),
   claimAgentRunContext: mocks.registerAgentRunContext,
@@ -403,8 +412,9 @@ vi.mock("../../channels/message/runtime.js", async () => {
 export const makeContext = (session?: {
   agentId: string;
   row: GatewaySessionRow;
-}): GatewayRequestContext =>
-  ({
+}): GatewayRequestContext => {
+  const projection = createAgentTestSessionRowProjection(resolveAgentTestConfig, session);
+  return {
     trackExecution: trackAsyncWork,
     dedupe: new Map(),
     addChatRun: vi.fn(),
@@ -419,15 +429,9 @@ export const makeContext = (session?: {
     broadcastToConnIds: vi.fn(),
     getSessionEventSubscriberConnIds: () => new Set(),
     getRuntimeConfig: () => resolveAgentTestConfig(),
-    ...bindSessionRowProjection(
-      {},
-      () =>
-        createAgentTestSessionRowProjection(
-          resolveAgentTestConfig,
-          session,
-        ) as unknown as SessionRowProjection,
-    ),
-  }) as unknown as GatewayRequestContext;
+    ...bindSessionRowProjection({}, () => projection),
+  } as unknown as GatewayRequestContext;
+};
 
 type AgentHandler = NonNullable<typeof agentHandlers.agent>;
 
@@ -567,7 +571,7 @@ function resetSessionAccessorMocks() {
         }
       : undefined;
   });
-  mocks.recordSessionParticipant.mockReset().mockReturnValue("inserted");
+  mocks.recordSessionParticipant.mockReset().mockResolvedValue("inserted");
   mocks.listSessionParticipantsReadOnly.mockReset().mockReturnValue(new Map());
   mocks.hasSessionTranscriptEventsSync.mockReset().mockReturnValue(false);
   mocks.readTranscriptMutationStateSync.mockReset().mockReturnValue({
@@ -1067,29 +1071,6 @@ export async function invokeAgentIdentityGet(
   return respond;
 }
 
-/**
- * Keep subagent registry dependencies deterministic across gateway tests.
- * Real ended-run hooks load a plugin bundle in the background, which can
- * replace registrations installed by the next test before it finalizes.
- */
-export function applyGatewaySubagentRegistryTestDeps(
-  overrides?: Parameters<typeof setSubagentRegistryDepsForTest>[0],
-) {
-  setSubagentRegistryDepsForTest({
-    // Registration alone does not complete a child. Completion fixtures supply
-    // their own terminal observation before exercising cleanup or announcement.
-    callGateway: (async () => ({
-      status: "pending",
-    })) as SubagentRegistryDeps["callGateway"],
-    loadAgentRuntimePluginRegistryHandle: () => undefined,
-    // Handler fixtures own no browser sessions; lifecycle cleanup has separate coverage.
-    cleanupBrowserSessionsForLifecycleEnd: async () => {},
-    ...overrides,
-  });
-}
-
-applyGatewaySubagentRegistryTestDeps();
-
 /** Keep handler tests on the real task lifecycle without paying for SQLite durability. */
 export function resetAgentTaskRegistryForTests(): void {
   resetTaskRegistryForTests({ persist: false });
@@ -1109,7 +1090,7 @@ export const describe0AfterEach0 = async () => {
   resetDiagnosticEventsForTest();
   resetAgentTaskRegistryForTests();
   resetSubagentRegistryForTests({ persist: false });
-  applyGatewaySubagentRegistryTestDeps();
+  resetSubagentRegistryMocks();
   mocks.agentCommand.mockReset();
   mocks.updateSessionStore.mockReset().mockResolvedValue(undefined);
   mocks.loadConfigReturn = {};
@@ -1142,7 +1123,7 @@ async function resetIntegrationState() {
   resetDetachedTaskLifecycleRuntimeForTests();
   resetAgentTaskRegistryForTests();
   resetSubagentRegistryForTests({ persist: false });
-  applyGatewaySubagentRegistryTestDeps();
+  resetSubagentRegistryMocks();
   mocks.agentCommand.mockReset();
   mocks.loadConfigReturn = {};
   mocks.loadSessionEntry.mockReset();

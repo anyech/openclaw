@@ -22,12 +22,7 @@ import {
 } from "./server-shared-auth-generation.js";
 import { recordClientPresenceActivity, refreshClientPresence } from "./server/client-presence.js";
 import type { GatewayClientRegistry } from "./server/client-registry.js";
-import {
-  getHealthCache,
-  getHealthVersion,
-  incrementPresenceVersion,
-} from "./server/health-state.js";
-import { broadcastPresenceSnapshot } from "./server/presence-events.js";
+import { getHealthCache } from "./server/health-state.js";
 import { invalidateGatewayPolicyClient } from "./server/ws-policy-close.js";
 import { bindSessionRowProjection } from "./session-row-projection-access.js";
 
@@ -48,6 +43,8 @@ type GatewayRequestContextRuntime = Pick<
   | "questionManager"
   | "forwardPluginApprovalRequest"
   | "forwardExecApprovalRequest"
+  | "forwardSystemAgentApprovalRequest"
+  | "forwardSystemAgentApprovalResolved"
   | "execApprovalIosPushDelivery"
   | "approvalWebPushDelivery"
   | "pluginApprovalIosPushDelivery"
@@ -60,6 +57,7 @@ type GatewayRequestContextRuntime = Pick<
   | "readPreparedGatewayModelCatalogBatch"
   | "getRuntimeSnapshot"
   | "broadcast"
+  | "publishPresence"
   | "broadcastToConnIds"
   | "nodeSendToSession"
   | "nodeSendToAllSubscribed"
@@ -107,6 +105,7 @@ type GatewayRequestContextRuntime = Pick<
   > & {
     sessionObserver: NonNullable<GatewayRequestContext["sessionObserver"]>;
     sessionActivitySummaries?: GatewayRequestContext["sessionActivitySummaries"];
+    channelAdmissionAudit?: GatewayRequestContext["channelAdmissionAudit"];
     sessionCompanion: NonNullable<GatewayRequestContext["sessionCompanion"]>;
     isConnectionActive: NonNullable<GatewayRequestContext["isConnectionActive"]>;
     clients: GatewayClientRegistry;
@@ -272,6 +271,7 @@ export function createGatewayRequestContext(
     sessionCompanion: runtime.sessionCompanion,
     sessionObserver,
     sessionActivitySummaries,
+    channelAdmissionAudit: runtime.channelAdmissionAudit,
     mentionInbox: runtime.mentionInbox,
     applyPluginLifecycleChange: runtime.kernel.applyPluginLifecycleChange,
     getMcpAppSandboxPort: runtime.transportBridge.getMcpAppSandboxPort,
@@ -289,6 +289,8 @@ export function createGatewayRequestContext(
       : undefined,
     forwardPluginApprovalRequest: runtime.forwardPluginApprovalRequest,
     forwardExecApprovalRequest: runtime.forwardExecApprovalRequest,
+    forwardSystemAgentApprovalRequest: runtime.forwardSystemAgentApprovalRequest,
+    forwardSystemAgentApprovalResolved: runtime.forwardSystemAgentApprovalResolved,
     execApprovalIosPushDelivery: runtime.execApprovalIosPushDelivery,
     approvalWebPushDelivery: runtime.approvalWebPushDelivery,
     pluginApprovalIosPushDelivery: runtime.pluginApprovalIosPushDelivery,
@@ -312,9 +314,8 @@ export function createGatewayRequestContext(
     refreshHealthSnapshot: runtime.refreshGatewayHealthSnapshotWithRuntime,
     logHealth: params.logHealth,
     logGateway: params.log,
-    incrementPresenceVersion,
-    getHealthVersion,
     broadcast,
+    publishPresence: runtime.publishPresence,
     broadcastToConnIds: runtime.broadcastToConnIds,
     nodeSendToSession: runtime.nodeSendToSession,
     nodeSendToAllSubscribed: runtime.nodeSendToAllSubscribed,
@@ -325,11 +326,7 @@ export function createGatewayRequestContext(
     isConnectionActive: runtime.isConnectionActive,
     recordClientActivity: (client) => {
       if (recordClientPresenceActivity(clients, client)) {
-        broadcastPresenceSnapshot({
-          broadcast,
-          incrementPresenceVersion,
-          getHealthVersion,
-        });
+        runtime.publishPresence();
       }
     },
     hasExecApprovalClients: (excludeConnId?: string) => {
@@ -435,11 +432,7 @@ export function createGatewayRequestContext(
         }
       }
       if (presenceChanged) {
-        broadcastPresenceSnapshot({
-          broadcast,
-          incrementPresenceVersion,
-          getHealthVersion,
-        });
+        runtime.publishPresence();
       }
     },
     invalidateClientsForDevice: (deviceId: string, opts?: { role?: string; reason?: string }) => {

@@ -37,29 +37,29 @@ function createClockedStateStore<T>(
     registerIfAbsent: async (...args) => store.registerIfAbsent(...args),
     lookup: async (...args) => store.lookup(...args),
     consume: async (...args) => store.consume(...args),
-    delete: async (...args) => store.delete(...args),
+    delete: async (key) => store.delete(key),
     entries: async () => store.entries(),
     clear: async () => store.clear(),
   };
 }
 
+beforeEach(() => {
+  resetPluginStateStoreForTests();
+  vi.restoreAllMocks();
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  vi.spyOn(webMedia, "loadWebMedia").mockResolvedValue({
+    buffer: Buffer.from("image-bytes"),
+    kind: "image",
+    contentType: "image/png",
+  });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("hosted outbound media post-expiry retention", () => {
-  beforeEach(() => {
-    resetPluginStateStoreForTests();
-    vi.restoreAllMocks();
-    vi.useFakeTimers();
-    vi.setSystemTime(1_000);
-    vi.spyOn(webMedia, "loadWebMedia").mockResolvedValue({
-      buffer: Buffer.from("image-bytes"),
-      kind: "image",
-      contentType: "image/png",
-    });
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it("denies new reads at logical expiry and deletes rows after serving grace", async () => {
     const metadataStore = createClockedStateStore<HostedOutboundMediaMetaRecord>({
       namespace: "retained-ttl-media",
@@ -134,22 +134,6 @@ describe("hosted outbound media post-expiry retention", () => {
 });
 
 describe("hosted outbound media aggregate byte capacity", () => {
-  beforeEach(() => {
-    resetPluginStateStoreForTests();
-    vi.restoreAllMocks();
-    vi.useFakeTimers();
-    vi.setSystemTime(1_000);
-    vi.spyOn(webMedia, "loadWebMedia").mockResolvedValue({
-      buffer: Buffer.from("image-bytes"),
-      kind: "image",
-      contentType: "image/png",
-    });
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it("rejects a new entry without evicting a live capability", async () => {
     let id = 0;
     const ids = ["111111111111111111111111", "222222222222222222222222"];
