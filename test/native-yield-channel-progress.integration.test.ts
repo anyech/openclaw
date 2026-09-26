@@ -126,6 +126,65 @@ afterAll(async () => {
 
 const effects = () => captured.filter(({ method }) => method === "POST" || method === "PATCH");
 
+it.each([
+  { replacement: "session", sessionId: "replacement-session" },
+  { replacement: "revision", sessionId: "proof-session" },
+] as const)(
+  "rejects a $replacement replacement between scope issuance and progress registration before HTTP send",
+  async ({ sessionId }) => {
+    const storePath = resolveStorePath(undefined, { agentId: "main" });
+    await upsertSessionEntry({
+      agentId: "main",
+      sessionKey,
+      storePath,
+      entry: { sessionId: "proof-session", lifecycleRevision: "original", updatedAt: Date.now() },
+    });
+    const scope = createAgentHarnessTaskRuntimeScope({
+      requesterSessionKey: sessionKey,
+      requesterSessionId: "proof-session",
+      requesterLifecycleRevision: "original",
+      requesterAgentId: "main",
+      requesterOrigin: origin,
+    });
+    await upsertSessionEntry({
+      agentId: "main",
+      sessionKey,
+      storePath,
+      entry: { sessionId, lifecycleRevision: "replacement", updatedAt: Date.now() },
+    });
+    const runtime = createAgentHarnessTaskRuntime({
+      runtime: "subagent",
+      taskKind: "codex-native",
+      scope,
+    });
+    const task = runtime.createRunningTaskRun({
+      runId: "synthetic-stale-native-child",
+      task: "synthetic task",
+      label: "Subagent",
+      notifyPolicy: "silent",
+      deliveryStatus: "not_applicable",
+    });
+    const onStopped = vi.fn();
+    const owner = runtime.registerProgressOwner!({
+      runIds: [task.runId!],
+      agentId: "main",
+      isCurrent: () => true,
+      onStopped,
+    });
+    expect(owner).toBeDefined();
+    try {
+      vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout"] });
+      owner!.notify();
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.waitFor(() => expect(onStopped).toHaveBeenCalledOnce(), { timeout: 25_000 });
+      expect(effects()).toHaveLength(0);
+    } finally {
+      owner?.dispose();
+    }
+  },
+  60_000,
+);
+
 it("composes successful native yield through real publisher and Discord HTTP send/edit", async () => {
   const native = await fixture.createNativeYieldChannelProof({
     scope: await captureNativeYieldDispatchScope({

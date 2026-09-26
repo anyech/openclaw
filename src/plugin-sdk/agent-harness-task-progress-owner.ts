@@ -1,5 +1,7 @@
 import { resolveRequesterStoreKey } from "../agents/subagents/announce/subagent-requester-store-key.js";
 import { getRuntimeConfig } from "../config/config.js";
+import { resolveSessionStorePathCore } from "../config/sessions.js";
+import { withSessionEntryReadOnlyInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import {
   getAgentRunContext,
   getAgentRunLifecycleGeneration,
@@ -43,7 +45,9 @@ export function registerAgentHarnessTaskProgressOwner({
   ) {
     return undefined;
   }
-  const canonicalKey = resolveRequesterStoreKey(getRuntimeConfig(), requesterSessionKey, agentId);
+  const cfg = getRuntimeConfig();
+  const canonicalKey = resolveRequesterStoreKey(cfg, requesterSessionKey, agentId);
+  const storePath = resolveSessionStorePathCore(cfg.session?.store, { agentId });
   const lifecycleGeneration = getAgentRunLifecycleGeneration();
   const readRuns = () =>
     listAgentRunsForSession({ sessionKey: canonicalKey, sessionId }).filter(
@@ -108,6 +112,30 @@ export function registerAgentHarnessTaskProgressOwner({
         );
       }),
     isCurrent: () => isRequesterCurrent() && progress.isCurrent(),
+    verifyRequester: async (assertCurrent) => {
+      try {
+        const matches = await withSessionEntryReadOnlyInWorker(
+          { agentId, sessionKey: canonicalKey, storePath, readConsistency: "latest" },
+          assertCurrent,
+          async (read) => {
+            if (!read.ok) {
+              throw read.error;
+            }
+            return (
+              read.value?.sessionId === sessionId &&
+              read.value.lifecycleRevision === lifecycleRevision
+            );
+          },
+        );
+        if (!matches) {
+          retired = true;
+        }
+        return matches;
+      } catch {
+        retired = true;
+        return false;
+      }
+    },
     onStopped: () => {
       retired = true;
       unsubscribe?.();

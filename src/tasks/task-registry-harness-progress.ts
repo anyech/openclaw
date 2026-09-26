@@ -27,6 +27,7 @@ const MAX_PROGRESS_DISPLAY_MEMBERS = 8;
 export function registerHarnessTaskProgress(params: {
   readTasks: () => TaskRecord[];
   isCurrent: () => boolean;
+  verifyRequester?: (assertCurrent: () => void) => Promise<boolean>;
   owner: {
     sessionKey: string;
     agentId?: string;
@@ -268,6 +269,11 @@ async function runHarnessProgressPublication(key: string, batch: TaskProgressBat
           throw new Error("Harness progress owner was superseded before delivery");
         }
       };
+      if (batch.harness?.verifyRequester && !(await batch.harness.verifyRequester(assertCurrent))) {
+        batch.harness.stop();
+        return null;
+      }
+      assertCurrent();
       const runtime = await loadTaskRegistryDeliveryRuntime();
       const preferenceEnabled = await runtime.prepareTaskProgressPreferenceReader(assertCurrent);
       const isPreferenceEnabled = () =>

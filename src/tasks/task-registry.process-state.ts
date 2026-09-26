@@ -121,6 +121,7 @@ export type TaskProgressBatch = {
   harness?: {
     readTasks: () => TaskRecord[];
     isCurrent: () => boolean;
+    verifyRequester?: (assertCurrent: () => void) => Promise<boolean>;
     owner: {
       agentId?: string;
       sessionKey: string;
