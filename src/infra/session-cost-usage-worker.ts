@@ -315,10 +315,6 @@ export async function executeUsageCostWorker(
       return result;
     },
     preflightSqliteEventTime: async (marker, range, updatedAtMs, file) => {
-      const cachedDecision = await cachedSummaryEventTimeLookup?.(marker, range, file);
-      if (cachedDecision !== undefined) {
-        return cachedDecision;
-      }
       const database = target(marker.agentId, marker.storePath);
       if (
         isIncognitoOpenClawAgentSqlitePath(database.path, {
@@ -326,20 +322,36 @@ export async function executeUsageCostWorker(
           env,
         })
       ) {
+        const cachedDecision = await cachedSummaryEventTimeLookup?.(marker, range, file);
+        if (cachedDecision !== undefined) {
+          return cachedDecision;
+        }
         return host("memory-event-time", { marker, range, updatedAtMs });
+      }
+      const currentArchive =
+        operation.kind === "summary"
+          ? await readStore(marker.agentId, marker.storePath, () => {
+              const result = withOpenClawAgentDatabaseReadOnly(
+                (opened) => readSessionColdTranscript(opened.db, marker.sessionId),
+                { ...database, env },
+              );
+              return result.found ? result.value : undefined;
+            })
+          : undefined;
+      // Only cold archives need the rollup shortcut to avoid scanning archived events.
+      // Hot SQLite has event-time rows available and would otherwise parse a fresh rollup
+      // here, then parse the same body again while projecting the summary.
+      if (currentArchive) {
+        const cachedDecision = await cachedSummaryEventTimeLookup?.(marker, range, file);
+        if (cachedDecision !== undefined) {
+          return cachedDecision;
+        }
       }
       if (operation.kind !== "summary" || !boundedEventTimeRangeKey(range)) {
         return readStore(marker.agentId, marker.storePath, () =>
           sessionTranscriptEventsOverlapRange(marker, range, updatedAtMs, env),
         );
       }
-      const currentArchive = await readStore(marker.agentId, marker.storePath, () => {
-        const result = withOpenClawAgentDatabaseReadOnly(
-          (opened) => readSessionColdTranscript(opened.db, marker.sessionId),
-          { ...database, env },
-        );
-        return result.found ? result.value : undefined;
-      });
       const identity = currentArchive
         ? verifiedColdArchiveExclusionKey({
             agentId: marker.agentId,
