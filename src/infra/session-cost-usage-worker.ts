@@ -97,7 +97,9 @@ function boundedEventTimeRangeKey(range: SessionTranscriptEventTimeRange): strin
   if (
     startMs === undefined ||
     !Number.isFinite(startMs) ||
-    (endMs !== undefined && (!Number.isFinite(endMs) || startMs > endMs))
+    endMs === undefined ||
+    !Number.isFinite(endMs) ||
+    startMs > endMs
   ) {
     return undefined;
   }

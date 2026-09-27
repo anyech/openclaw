@@ -342,22 +342,6 @@ describe("usage cold cache", () => {
     await expect(runSummary()).resolves.toMatchObject({ kind: "summary" });
     expect(archiveReader).not.toHaveBeenCalled();
 
-    const startOnlySummary = () =>
-      executeUsageCostWorker(
-        { ...input, operation: { ...input.operation, endMs: undefined } },
-        channel,
-        control,
-        readDatabase,
-      );
-    archiveReader.mockClear();
-    await expect(startOnlySummary()).resolves.toMatchObject({ kind: "summary" });
-    expect(
-      archiveReader.mock.calls.some(([params]) => params.archive.session_id === scope.sessionId),
-    ).toBe(true);
-    archiveReader.mockClear();
-    await expect(startOnlySummary()).resolves.toMatchObject({ kind: "summary" });
-    expect(archiveReader).not.toHaveBeenCalled();
-
     const replacementGeneration = `replacement-${originalArchive.generation}`;
     runOpenClawAgentWriteTransaction(
       ({ db }) => {
