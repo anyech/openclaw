@@ -198,7 +198,15 @@ async function listUsageCountedTranscriptFileSources(
   }
   const preflight = await runTasksWithConcurrency({
     tasks: candidates.map((source) => async () => {
-      if (transcriptMetadataMayOverlapRange(source.mtimeMs, params.eventTimeRange!)) {
+      if (
+        transcriptMetadataMayOverlapRange(source.mtimeMs, params.eventTimeRange!) ||
+        // A live JSONL modified after the requested end may still have in-range events.
+        // Include it for queued refresh instead of opening its stream in a summary preflight.
+        // Old-mtime files and compressed cold archives still require content preflight.
+        (source.sourcePath.endsWith(".jsonl") &&
+          params.eventTimeRange!.endMs !== undefined &&
+          source.mtimeMs > params.eventTimeRange!.endMs)
+      ) {
         return source;
       }
       return (await transcriptSourceOverlapsRange(source.sourcePath, params.eventTimeRange!))

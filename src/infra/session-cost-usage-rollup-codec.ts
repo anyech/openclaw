@@ -185,18 +185,18 @@ export function cachedRollupMayOverlapEventTimeRange(
     if (!isRecord(candidate)) {
       return undefined;
     }
-    const timestampMs = candidate.timestampMs;
+    const bucketEventTimeMs = candidate.timestampMs;
     if (
-      typeof timestampMs !== "number" ||
-      !Number.isSafeInteger(timestampMs) ||
-      String(timestampMs) !== key ||
-      Number.isNaN(new Date(timestampMs).valueOf())
+      typeof bucketEventTimeMs !== "number" ||
+      !Number.isSafeInteger(bucketEventTimeMs) ||
+      String(bucketEventTimeMs) !== key ||
+      Number.isNaN(new Date(bucketEventTimeMs).valueOf())
     ) {
       return undefined;
     }
     if (
-      (range.startMs === undefined || timestampMs >= range.startMs) &&
-      (range.endMs === undefined || timestampMs <= range.endMs)
+      (range.startMs === undefined || bucketEventTimeMs >= range.startMs) &&
+      (range.endMs === undefined || bucketEventTimeMs <= range.endMs)
     ) {
       return true;
     }
