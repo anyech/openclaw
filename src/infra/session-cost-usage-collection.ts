@@ -76,7 +76,8 @@ export type UsageCostCollectionAccess = {
     marker: SqliteSessionFileMarker,
     range: SessionTranscriptEventTimeRange,
     updatedAtMs: number | null | undefined,
-  ) => Promise<boolean>;
+    file: UsageCostTranscriptFile,
+  ) => Promise<boolean | undefined>;
 };
 
 type UsageCostJsonlSource = {
@@ -217,6 +218,7 @@ async function transcriptSourceOverlapsRange(
   range: SessionTranscriptEventTimeRange,
 ): Promise<boolean> {
   const compressed = sourcePath.endsWith(".zst");
+  // SAFETY: Node versions without the optional zstd API are rejected before invocation.
   const createZstdDecompress = (zlib as Partial<typeof zlib>).createZstdDecompress;
   if (compressed && !createZstdDecompress) {
     throw new Error("Cannot scan compressed transcript archive: this runtime lacks zstd support");
@@ -323,26 +325,40 @@ export async function listUsageCountedTranscriptSources(
         { includeAllWindows: Boolean(params?.eventTimeRange) },
       ).filter((instance) => !isInternalSessionEffectsKey(instance.sessionKey));
   const sqliteCandidates = instances.filter((instance) => instance.agentId === logicalAgentId);
+  const candidateMarkers = sqliteCandidates.map((instance) => ({
+    agentId: logicalAgentId,
+    sessionId: instance.sessionId,
+    storePath,
+  }));
+  const candidateFiles = await readUsageCostSqliteFiles(candidateMarkers, params);
   const sqliteMarkers = params?.eventTimeRange
     ? await runTasksWithConcurrency({
-        tasks: sqliteCandidates.map((instance) => async () => {
+        tasks: sqliteCandidates.map((instance, index) => async () => {
           const marker: SqliteSessionFileMarker = {
             agentId: logicalAgentId,
             sessionId: instance.sessionId,
             storePath,
           };
-          const overlapsRange = params.preflightSqliteEventTime
+          const file = candidateFiles[index];
+          if (!file) {
+            return undefined;
+          }
+          const cachedDecision = params.preflightSqliteEventTime
             ? await params.preflightSqliteEventTime(
                 marker,
                 params.eventTimeRange!,
                 instance.updatedAtMs,
+                file,
               )
-            : await sessionTranscriptEventsOverlapRange(
-                marker,
-                params.eventTimeRange!,
-                instance.updatedAtMs,
-                params.env,
-              );
+            : undefined;
+          const overlapsRange =
+            cachedDecision ??
+            (await sessionTranscriptEventsOverlapRange(
+              marker,
+              params.eventTimeRange!,
+              instance.updatedAtMs,
+              params.env,
+            ));
           return overlapsRange ? marker : undefined;
         }),
         limit: USAGE_COST_EVENT_TIME_PREFLIGHT_CONCURRENCY,
@@ -354,13 +370,10 @@ export async function listUsageCountedTranscriptSources(
           Boolean(marker),
         );
       })
-    : sqliteCandidates.map((instance) => ({
-        agentId: logicalAgentId,
-        sessionId: instance.sessionId,
-        storePath,
-      }));
-  const sqliteBacked = (await readUsageCostSqliteFiles(sqliteMarkers, params)).filter(
-    (file) => file !== undefined,
+    : candidateMarkers;
+  const includedIds = new Set(sqliteMarkers.map((marker) => marker.sessionId));
+  const sqliteBacked = candidateFiles.filter((file): file is UsageCostSqliteFile =>
+    Boolean(file && includedIds.has(file.sessionId ?? "")),
   );
   const sqliteSessionIds = new Set(sqliteBacked.map((file) => file.sessionId).filter(Boolean));
   const canonicalFileBacked = fileBacked.filter(

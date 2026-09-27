@@ -117,6 +117,7 @@ export async function forEachVerifiedSessionColdArchiveEvent(params: {
     throw new Error("Cold transcript archive exceeds the supported bounded read size");
   }
   const bytes = await readVerifiedSessionColdArchive(params);
+  // SAFETY: Node versions without the optional zstd API are rejected before invocation.
   const createZstdDecompress = (zlib as Partial<typeof zlib>).createZstdDecompress;
   if (!createZstdDecompress) {
     throw new Error("Cannot decode compressed transcript archive: this runtime lacks zstd support");

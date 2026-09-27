@@ -27,6 +27,12 @@ export type SessionTranscriptEventTimeSource =
   | { kind: "hot"; overlapsRange: boolean }
   | { kind: "cold"; storePath: string; archive: SessionColdArchive };
 
+function coldArchiveBlobByteLengthSql() {
+  return /* kysely-allow-raw: SQLite length reads the stored BLOB byte count without selecting its payload. */ sql<
+    number | null
+  >`length(archive_blob)`.as("archive_blob_bytes");
+}
+
 /** Read event-time evidence from one admitted database snapshot, without restoring cold rows. */
 export function readSessionTranscriptEventTimeSourceFromDatabase(
   database: Pick<OpenClawAgentDatabase, "db" | "path">,
@@ -61,7 +67,7 @@ export function readSessionTranscriptEventTimeSourceFromDatabase(
           database.db,
           db
             .selectFrom("session_transcript_cold_archives")
-            .select(sql<number | null>`length(archive_blob)`.as("archive_blob_bytes"))
+            .select(coldArchiveBlobByteLengthSql())
             .where("session_id", "=", marker.sessionId),
         )?.archive_blob_bytes;
         if (

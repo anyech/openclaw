@@ -1919,6 +1919,28 @@ describe("session cost usage", () => {
     expect(summary?.utcQuarterHourTokenUsage?.[0]?.totalTokens).toBe(99);
   });
 
+  it("keeps the JSONL file-mtime cutoff for session discovery", async () => {
+    const root = await makeSessionCostRoot("discover-mtime");
+    const sessionsDir = path.join(root, "agents", "main", "sessions");
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const sessionFile = path.join(sessionsDir, "sess-old-mtime.jsonl");
+    const now = Date.now();
+    await fs.writeFile(
+      sessionFile,
+      transcriptText("sess-old-mtime", {
+        type: "message",
+        timestamp: new Date(now).toISOString(),
+        message: { role: "assistant", usage: { input: 1, output: 0, totalTokens: 1 } },
+      }),
+      "utf-8",
+    );
+    await fs.utimes(sessionFile, 1, 1);
+
+    await withStateDir(root, async () => {
+      expect(await discoverAllSessions({ startMs: now - 24 * 60 * 60 * 1000 })).toEqual([]);
+    });
+  });
+
   it("discovers an in-window event even when file mtime is after endMs", async () => {
     const root = await makeSessionCostRoot("discover");
     const sessionsDir = path.join(root, "agents", "main", "sessions");

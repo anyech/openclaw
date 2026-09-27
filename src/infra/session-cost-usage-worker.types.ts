@@ -18,6 +18,12 @@ import type {
 
 export type UsageCostWorkerDatabase = { agentId: string; path: string };
 
+export type CachedSummaryEventTimeLookup = (
+  marker: SqliteSessionFileMarker,
+  range: SessionTranscriptEventTimeRange,
+  file: UsageCostTranscriptFile,
+) => Promise<boolean | undefined>;
+
 export type UsageCostWorkerLocation = {
   agentId: string;
   databasePath: string;
@@ -32,7 +38,12 @@ type UsageCostWorkerRange = {
 };
 
 export type UsageCostWorkerOperation =
-  | { kind: "inventory"; eventTimeRange?: SessionTranscriptEventTimeRange; sessionFiles?: string[] }
+  | {
+      kind: "inventory";
+      eventTimeRange?: SessionTranscriptEventTimeRange;
+      minMtimeMs?: number;
+      sessionFiles?: string[];
+    }
   | ({ kind: "summary"; pricingFingerprint: string } & UsageCostWorkerRange)
   | {
       kind: "sessions";
