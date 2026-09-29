@@ -65,6 +65,21 @@ type ChatTurnRouterOptions = {
 
 type CaptureRuntime = RuntimeEnv & { read: () => string };
 type PersistentApplyGuard = () => void;
+type ConfigRevisionProof = {
+  expectedConfigRevision: string;
+  assertConfigCurrent: () => void;
+};
+
+function isConfigRevisionProof(value: unknown): value is ConfigRevisionProof {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "expectedConfigRevision" in value &&
+    typeof value.expectedConfigRevision === "string" &&
+    "assertConfigCurrent" in value &&
+    typeof value.assertConfigCurrent === "function"
+  );
+}
 
 function createCaptureRuntime(): CaptureRuntime {
   const lines: string[] = [];
@@ -553,10 +568,17 @@ export class ChatTurnRouter {
   ): Promise<SystemAgentOperationResult | undefined> {
     try {
       const execute = this.dependencies.executeOperation ?? executeSystemAgentOperation;
-      if (approved) {
-        await this.callbacks.requirePersistentApplyInference(capture);
-      }
+      const verifiedRevision = approved
+        ? await this.callbacks.requirePersistentApplyInference(capture)
+        : undefined;
+      const configProof = isConfigRevisionProof(verifiedRevision) ? verifiedRevision : undefined;
       return await execute(operation, capture, {
+        ...(configProof
+          ? {
+              expectedConfigRevision: configProof.expectedConfigRevision,
+              assertVerifiedConfigCurrent: configProof.assertConfigCurrent,
+            }
+          : {}),
         approved,
         ...(this.options.requesterAgentId
           ? { requesterAgentId: this.options.requesterAgentId }

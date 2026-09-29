@@ -364,6 +364,9 @@ export async function executeSystemAgentOperation(
               ...(ctx.assertPersistentApply
                 ? { beforePersistentApply: ctx.assertPersistentApply }
                 : {}),
+              ...(ctx.expectedConfigRevision !== undefined
+                ? { expectedConfigRevision: ctx.expectedConfigRevision }
+                : {}),
             }),
           );
           return { summary: `Removed config ${operation.path}`, details: { path: operation.path } };

@@ -126,6 +126,7 @@ describe("SystemAgentChatEngine approval", () => {
           path: "gateway.port",
           value: "19001",
           cliOptions: {},
+          expectedConfigRevision: expect.stringMatching(/^[a-f0-9]{64}$/u),
         });
         expect(applied?.text).toContain("[openclaw] done: config.set");
         expect(observedInputs[1]).toContain("was approved");

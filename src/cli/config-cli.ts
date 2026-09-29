@@ -53,6 +53,8 @@ export async function runConfigSet(opts: {
   cliOptions: ConfigSetOptions;
   runtime?: RuntimeEnv;
   beforePersistentApply?: () => void;
+  /** Exact verified maintenance revision; ordinary CLI writes omit it. */
+  expectedConfigRevision?: string;
   /** Embedded recovery needs the writer's typed postcommit/rollback outcome. */
   throwOnError?: boolean;
 }) {
@@ -79,6 +81,9 @@ export async function runConfigSet(opts: {
       successMode: "set",
       ...(currentExpectation ? { currentExpectation } : {}),
       ...(opts.beforePersistentApply ? { beforePersistentApply: opts.beforePersistentApply } : {}),
+      ...(opts.expectedConfigRevision !== undefined
+        ? { expectedConfigRevision: opts.expectedConfigRevision }
+        : {}),
     });
   } catch (err) {
     if (opts.throwOnError) {
@@ -183,6 +188,7 @@ export async function runConfigUnset(opts: {
   cliOptions?: ConfigUnsetOptions;
   runtime?: RuntimeEnv;
   beforePersistentApply?: () => void;
+  expectedConfigRevision?: string;
 }) {
   const runtime = opts.runtime ?? defaultRuntime;
   const cliOptions = opts.cliOptions ?? {};
@@ -202,6 +208,9 @@ export async function runConfigUnset(opts: {
       options: cliOptions,
       successMode: "set",
       ...(opts.beforePersistentApply ? { beforePersistentApply: opts.beforePersistentApply } : {}),
+      ...(opts.expectedConfigRevision !== undefined
+        ? { expectedConfigRevision: opts.expectedConfigRevision }
+        : {}),
     });
   } catch (err) {
     handleConfigMutationError({

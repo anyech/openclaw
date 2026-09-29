@@ -217,6 +217,10 @@ export type ExecuteOptions = {
    * immediately followed by the persistent effect it authorizes.
    */
   beforePersistentApply?: () => void;
+  /** Config/include revision verified for this bound maintenance operation. */
+  expectedConfigRevision?: string;
+  /** Synchronous config fence for non-config store effects only; never postcommit config writes. */
+  assertVerifiedConfigCurrent?: () => void;
   /** Adopt the exact final binding after a verified model-route write commits. */
   onVerifiedInferenceChanged?: (binding: SystemAgentVerifiedInferenceBinding) => void;
 };
@@ -232,6 +236,8 @@ type PersistentApplyContext = {
   deps?: SystemAgentCommandDeps;
   /** Synchronous authority guard for the owner immediately before mutation. */
   assertPersistentApply?: () => void;
+  expectedConfigRevision?: string;
+  assertVerifiedConfigCurrent?: () => void;
   /** Re-check authority, then enter one persistent side-effect boundary. */
   commit<T>(effect: () => Promise<T> | T): Promise<T>;
 };
@@ -270,6 +276,12 @@ export async function applyPersistentOperation(params: {
     runtime,
     deps: opts.deps,
     ...(assertPersistentApply ? { assertPersistentApply } : {}),
+    ...(opts.expectedConfigRevision !== undefined
+      ? { expectedConfigRevision: opts.expectedConfigRevision }
+      : {}),
+    ...(opts.assertVerifiedConfigCurrent
+      ? { assertVerifiedConfigCurrent: opts.assertVerifiedConfigCurrent }
+      : {}),
     commit,
   });
   const after = await readConfigFileSnapshot();
@@ -317,6 +329,10 @@ export async function runConfigSetOperation(params: {
   const beforePersistentApply = ctx.assertPersistentApply
     ? { beforePersistentApply: ctx.assertPersistentApply }
     : {};
+  const verifiedRevision =
+    ctx.expectedConfigRevision !== undefined
+      ? { expectedConfigRevision: ctx.expectedConfigRevision }
+      : {};
   if (operation.kind === "config-set" || operation.secret === undefined) {
     await ctx.commit(() =>
       runConfigSet({
@@ -331,6 +347,7 @@ export async function runConfigSetOperation(params: {
               },
             }),
         ...beforePersistentApply,
+        ...verifiedRevision,
       }),
     );
     return {};
@@ -358,13 +375,18 @@ export async function runConfigSetOperation(params: {
   // Every save gets a fresh entry and no entry is ever overwritten or deleted
   // here: another config key or auth profile may use, or start using, any
   // entry at any time. The new ref is picked up by the normal config reload.
+  const assertStoreCurrent = () => {
+    ctx.assertPersistentApply?.();
+    ctx.assertVerifiedConfigCurrent?.();
+  };
   const storeEntry = await ctx.commit(() =>
     writeSecretStoreEntryForConfigRef({
       baseName: operation.id,
       value: secret,
       updatedBy: "openclaw",
-      // The worker re-checks the requester at transaction and commit admission.
-      ...(ctx.assertPersistentApply ? { assertCurrent: ctx.assertPersistentApply } : {}),
+      // Re-check the requester and pinned fallback config at store transaction
+      // and commit admission; the later config writer has its own revision CAS.
+      assertCurrent: assertStoreCurrent,
     }),
   );
   try {
@@ -372,6 +394,7 @@ export async function runConfigSetOperation(params: {
       path: operation.path,
       cliOptions: { refProvider, refSource: "store", refId: storeEntry },
       ...beforePersistentApply,
+      ...verifiedRevision,
     });
   } catch (error) {
     // The writer can fail after publication and can decline or fail rollback.

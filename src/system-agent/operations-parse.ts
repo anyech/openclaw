@@ -46,6 +46,7 @@ export type SystemAgentCommandDeps = {
     value?: string;
     cliOptions: ConfigSetOptions;
     beforePersistentApply?: () => void;
+    expectedConfigRevision?: string;
   }) => Promise<void>;
   runConfigUnset?: typeof import("../cli/config-cli.js").runConfigUnset;
   runGatewayRestart?: () => Promise<void | boolean>;
