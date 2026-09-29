@@ -247,14 +247,13 @@ export type SessionTranscriptRawDeltaLimits = {
   maxEvents?: number;
 };
 
-/** Generation-aware outcome for one bounded raw transcript read. */
-export type SessionTranscriptRawDeltaResult =
+type SessionTranscriptDeltaResult<TEvent, TResetReason extends string> =
   | {
       kind: "page";
       /** Cursor positioned after the last returned event. */
       cursor: string;
-      /** Ordered raw transcript events selected for this page. */
-      events: SessionTranscriptEventRow[];
+      /** Ordered transcript events selected for this page. */
+      events: TEvent[];
       /** True when another event remains after this page. */
       hasMore: boolean;
       /** First unread event size when it cannot fit under maxBytes. */
@@ -267,9 +266,15 @@ export type SessionTranscriptRawDeltaResult =
       /** Fresh bootstrap cursor for the current generation. */
       cursor: string;
       /** Stable discontinuity that invalidated the supplied cursor. */
-      reason: "generation_mismatch" | "invalid_cursor" | "scope_mismatch";
+      reason: TResetReason;
     }
   | { kind: "missing" };
+
+/** Generation-aware outcome for one bounded raw transcript read. */
+export type SessionTranscriptRawDeltaResult = SessionTranscriptDeltaResult<
+  SessionTranscriptEventRow,
+  "generation_mismatch" | "invalid_cursor" | "scope_mismatch"
+>;
 
 /** Count, byte, and continuation bounds for one visible-message page. */
 export type SessionTranscriptVisibleMessageDeltaLimits = {
@@ -290,33 +295,10 @@ export type SessionTranscriptVisibleMessageEventRow = SessionTranscriptEventRow 
 };
 
 /** Generation-aware outcome for one bounded visible-message read. */
-export type SessionTranscriptVisibleMessageDeltaResult =
-  | {
-      kind: "page";
-      /** Cursor positioned after the last returned visible message. */
-      cursor: string;
-      /** Ordered active-path message events selected for this page. */
-      events: SessionTranscriptVisibleMessageEventRow[];
-      /** True when another visible message remains after this page. */
-      hasMore: boolean;
-      /** First unread event size when it cannot fit under maxBytes. */
-      requiredBytes?: number;
-      /** Stored JSONL bytes represented by events. */
-      serializedBytes: number;
-    }
-  | {
-      kind: "reset";
-      /** Fresh bootstrap cursor for the current visible generation. */
-      cursor: string;
-      /** Stable discontinuity that invalidated the supplied cursor. */
-      reason:
-        | "anchor_missing"
-        | "anchor_moved"
-        | "generation_mismatch"
-        | "invalid_cursor"
-        | "scope_mismatch";
-    }
-  | { kind: "missing" };
+export type SessionTranscriptVisibleMessageDeltaResult = SessionTranscriptDeltaResult<
+  SessionTranscriptVisibleMessageEventRow,
+  "anchor_missing" | "anchor_moved" | "generation_mismatch" | "invalid_cursor" | "scope_mismatch"
+>;
 
 export type TranscriptMessageAppendOptions<TMessage> = {
   /** Rebase a stale explicit parent when the current tail still descends from it. */
@@ -405,10 +387,11 @@ export type SessionTranscriptTurnMessageAppend = TranscriptMessageAppendOptions<
    */
   shouldAppend?: (context: SessionTranscriptTurnWriteContext) => Promise<boolean> | boolean;
   /**
-   * Rechecks the newest assistant row after the write transaction begins.
+   * Rechecks authority after the write transaction begins. Read the newest assistant
+   * only when the predicate needs it, synchronously within this callback.
    * Direct synchronous writers bypass the process queue, so prepared facts can be stale.
    */
-  shouldAppendInTransaction?: (latestAssistantMessage: unknown) => boolean;
+  shouldAppendInTransaction?: (readLatestAssistantMessage: () => unknown) => boolean;
 };
 
 export type SessionTranscriptTurnWriteContext = Partial<SessionTranscriptRuntimeTarget>;
@@ -441,11 +424,14 @@ export type SessionTranscriptTurnPersistOptions = {
   /** Exact run provenance persisted on output rows and emitted on terminal assistant updates. */
   runId?: string;
   /**
-   * Complete appended or matched messages synchronously after guarded SQLite commit,
-   * before the write yields to cancellation, owner drain, or transcript publication.
+   * Accept appended or matched messages synchronously after guarded SQLite commit.
+   * Explicit completion work is joined before owner drain or transcript publication.
    * The canonical result preserves replay bytes. Throws cannot roll back committed rows.
    */
-  onMessageCommitted?: (result: TranscriptMessageAppendResult<unknown>) => void;
+  onMessageCommitted?: (
+    result: TranscriptMessageAppendResult<unknown>,
+    acceptCompletion: (complete: () => Promise<void>) => void,
+  ) => void;
   /** Publish each appended message inline, one file-only invalidation, or nothing. */
   updateMode?: SessionTranscriptTurnUpdateMode;
   /** Emit file-only updates even when every candidate message was skipped. */

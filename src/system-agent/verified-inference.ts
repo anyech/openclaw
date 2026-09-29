@@ -224,6 +224,19 @@ function systemAgentRouteIdentity(
   return identity;
 }
 
+function loadRouteAuthProfileStore(
+  route: SystemAgentVerifiedExecutionRoute,
+  deps: SystemAgentVerifiedInferenceDeps,
+): AuthProfileStore {
+  return (deps.loadAuthProfileStoreForRuntime ?? loadAuthProfileStoreForRuntime)(route.agentDir, {
+    readOnly: true,
+    migrationProvider: route.provider,
+    allowKeychainPrompt: false,
+    config: route.runConfig,
+    externalCliProviderIds: [route.provider],
+  });
+}
+
 async function resolveCurrentRuntimeOwnerFingerprint(params: {
   route: SystemAgentVerifiedExecutionRoute;
   kind: OpaqueRuntimeOwnerKind;
@@ -254,14 +267,7 @@ async function resolveCurrentRuntimeOwnerFingerprint(params: {
   }
   let authProfileOwnerFingerprint: string | undefined;
   if (params.authProfileId) {
-    const loadStore = params.deps.loadAuthProfileStoreForRuntime ?? loadAuthProfileStoreForRuntime;
-    const store = loadStore(params.route.agentDir, {
-      readOnly: true,
-      migrationProvider: params.route.provider,
-      allowKeychainPrompt: false,
-      config: params.route.runConfig,
-      externalCliProviderIds: [params.route.provider],
-    });
+    const store = loadRouteAuthProfileStore(params.route, params.deps);
     authProfileOwnerFingerprint = fingerprintAuthProfileOwnerShape({
       profileId: params.authProfileId,
       credential: store.profiles[params.authProfileId],
@@ -517,15 +523,7 @@ async function resolveCurrentAuthFingerprint(params: {
       params.deps.resolveCliAuthBindingFingerprint ?? resolveCliAuthBindingFingerprint;
     let resolvedAuth: ResolvedProviderAuth | undefined;
     if (params.authProfileId) {
-      const loadStore =
-        params.deps.loadAuthProfileStoreForRuntime ?? loadAuthProfileStoreForRuntime;
-      const store = loadStore(params.route.agentDir, {
-        readOnly: true,
-        migrationProvider: params.route.provider,
-        allowKeychainPrompt: false,
-        config: params.route.runConfig,
-        externalCliProviderIds: [params.route.provider],
-      });
+      const store = loadRouteAuthProfileStore(params.route, params.deps);
       const authCredential = store.profiles[params.authProfileId];
       const needsMaterializedSecret =
         (authCredential?.type === "api_key" && !authCredential.key) ||
@@ -568,14 +566,7 @@ async function resolveCurrentAuthFingerprint(params: {
   }
   let store: AuthProfileStore | undefined;
   if (params.authProfileId) {
-    const loadStore = params.deps.loadAuthProfileStoreForRuntime ?? loadAuthProfileStoreForRuntime;
-    store = loadStore(params.route.agentDir, {
-      readOnly: true,
-      migrationProvider: params.route.provider,
-      allowKeychainPrompt: false,
-      config: params.route.runConfig,
-      externalCliProviderIds: [params.route.provider],
-    });
+    store = loadRouteAuthProfileStore(params.route, params.deps);
     const credential = store.profiles[params.authProfileId];
     if (!credential) {
       return undefined;
@@ -788,10 +779,6 @@ export async function createSystemAgentVerifiedInferenceBinding(params: {
   if (!currentAuthFingerprint || reportedAuthFingerprint !== currentAuthFingerprint) {
     throw new Error("The successful inference credential is no longer the active route owner.");
   }
-  const authFingerprint = reportedAuthFingerprint;
-  if (!authFingerprint) {
-    throw new Error("The successful inference run did not report an execution owner.");
-  }
   if (
     pluginHarnessId &&
     resolveRouteHarnessOwnerPluginIds(params.configuredRoute.sourceConfig, execution).length === 0
@@ -820,7 +807,7 @@ export async function createSystemAgentVerifiedInferenceBinding(params: {
       ...(successfulHarnessId ? { agentHarnessId: successfulHarnessId } : {}),
       ...(modelId ? { modelId } : {}),
       ...(modelApi ? { modelApi } : {}),
-      authFingerprint,
+      authFingerprint: currentAuthFingerprint,
       ...(proofKind === "runtime-owner" ? { proofKind } : {}),
       ...(params.auth.runtimeOwnerKind ? { runtimeOwnerKind: params.auth.runtimeOwnerKind } : {}),
       ...(runtimeOwnerId ? { runtimeOwnerId } : {}),

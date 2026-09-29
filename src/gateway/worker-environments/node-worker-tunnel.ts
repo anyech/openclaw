@@ -9,6 +9,7 @@ import {
   formatNodeRunnerUpdateRequired,
   NODE_RUNNER_UPDATE_REQUIRED_ISSUE,
   NODE_WORKER_ENVIRONMENT_SESSION_VERSION,
+  resolveNodeWorkerLaunchToolNames,
 } from "../../infra/node-runner-inventory.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import type { SpawnResult } from "../../process/exec.js";
@@ -33,6 +34,7 @@ import type {
 } from "../node-registry-private.js";
 import {
   measureNodeWorkerLaunchBytes,
+  RETRYABLE_NODE_WORKER_TRANSPORT_CODES,
   type createNodeWorkerLaunchAdapter,
 } from "./node-launch-adapter.js";
 import { raceNodeWorkerOperation } from "./node-worker-abort.js";
@@ -60,15 +62,6 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
 const COMMAND_RESULT_GRACE_MS = 5_000;
 const RETRY_DELAY_MS = 100;
 const tunnelLog = createSubsystemLogger("gateway/worker-tunnel");
-const RETRYABLE_TRANSPORT_CODES = new Set([
-  "DISCONNECTED",
-  "NOT_CONNECTED",
-  "PAIRING_CHANGED",
-  "PRIVATE_DIALECT_UNAVAILABLE",
-  "ROUTE_CHANGED",
-  "TIMEOUT",
-  "UNAVAILABLE",
-]);
 
 export type NodeWorkerWorkspaceBindingResolver = (binding: {
   environmentId: string;
@@ -113,25 +106,16 @@ type NodeTunnelEntry = NodeEnvironmentOwner & {
 };
 
 function spawnResultFromReceipt(receipt: NodeWorkerSupervisorReceipt): SpawnResult {
-  if (receipt.state === "completed") {
-    return {
-      stdout: receipt.resultJson,
-      stderr: "",
-      code: 0,
-      signal: null,
-      killed: false,
-      termination: "exit",
-    };
-  }
   if (
+    receipt.state === "completed" ||
     receipt.state === "failed" ||
     receipt.state === "interrupted" ||
     receipt.state === "cancelled"
   ) {
     return {
-      stdout: "",
-      stderr: receipt.errorText,
-      code: 1,
+      stdout: receipt.state === "completed" ? receipt.resultJson : "",
+      stderr: receipt.state === "completed" ? "" : receipt.errorText,
+      code: receipt.state === "completed" ? 0 : 1,
       signal: null,
       killed: receipt.state === "cancelled" || receipt.state === "interrupted",
       termination: "exit",
@@ -285,7 +269,10 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
             result.error?.message ?? "workspace-transfer-failed: transfer did not complete",
           );
         }
-        if (command.transportRetry === "idempotent" && RETRYABLE_TRANSPORT_CODES.has(code)) {
+        if (
+          command.transportRetry === "idempotent" &&
+          RETRYABLE_NODE_WORKER_TRANSPORT_CODES.has(code)
+        ) {
           await sleepWithAbort(Math.min(RETRY_DELAY_MS, remainingMs), signal);
           continue;
         }
@@ -365,6 +352,10 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
       ownerEpoch: entry.ownerEpoch,
       measureLaunchTurn: (plan, claim) =>
         measureNodeWorkerLaunchBytes(entry.deviceId, buildLaunchInput(plan, claim)),
+      readLaunchToolNames: async () => {
+        const node = await options.getTransport()?.getCurrentNode(entry.deviceId);
+        return resolveNodeWorkerLaunchToolNames(node?.workerHost);
+      },
       launchTurn: async (request) => {
         if (entry.executionMode !== "worker-turn") {
           throw new Error("remote-exec environments do not launch embedded worker turns");
@@ -477,7 +468,7 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
           if (!result.ok) {
             const code = result.error?.code ?? "UNAVAILABLE";
             const message = `node worker environment stop failed (${code})`;
-            throw RETRYABLE_TRANSPORT_CODES.has(code)
+            throw RETRYABLE_NODE_WORKER_TRANSPORT_CODES.has(code)
               ? new WorkerTunnelOwnerDisconnectedError(message)
               : new Error(message);
           }
