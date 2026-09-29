@@ -4,6 +4,10 @@ import { withProgress } from "../cli/progress.js";
 import { defaultRuntime, writeRuntimeJson, type RuntimeEnv } from "../runtime.js";
 import type { SystemAgentAssistantPlanner } from "./assistant.js";
 import { resolveSystemAgentOperation } from "./dialogue.js";
+import {
+  BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE,
+  isSystemAgentBoundFallbackOperationAllowed,
+} from "./fallback-operation-scope.js";
 import { SystemAgentInferenceUnavailableError } from "./inference-error.js";
 import {
   executeSystemAgentOperation,
@@ -126,6 +130,15 @@ async function runOneShot(
   if (operation.kind === "none" && operation.message === "") {
     return;
   }
+  // Reject unsupported fallback effects before another owner probe or approval.
+  const boundFallbackModelRef = opts.verifiedInference.execution.fallbackModelRef;
+  if (
+    boundFallbackModelRef !== undefined &&
+    !isSystemAgentBoundFallbackOperationAllowed(operation)
+  ) {
+    runtime.log(BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE);
+    return;
+  }
   // The planner may take long enough for the verified route to change. Never
   // apply its result under a different inference owner.
   await requireVerifiedInference(opts);
@@ -136,6 +149,7 @@ async function runOneShot(
       : undefined;
   await executeSystemAgentOperation(operation, runtime, {
     approved,
+    ...(boundFallbackModelRef !== undefined ? { boundFallbackModelRef } : {}),
     ...(proof
       ? {
           expectedConfigRevision: proof.expectedConfigRevision,

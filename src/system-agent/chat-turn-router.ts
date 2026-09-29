@@ -19,6 +19,10 @@ import {
 } from "./config-redaction.js";
 import { approvalQuestion } from "./dialogue.js";
 import {
+  BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE,
+  isSystemAgentBoundFallbackOperationAllowed,
+} from "./fallback-operation-scope.js";
+import {
   SystemAgentInferenceUnavailableError,
   isSystemAgentInferenceUnavailableError,
 } from "./inference-error.js";
@@ -157,6 +161,9 @@ export class ChatTurnRouter {
 
   propose(operation: SystemAgentOperation): string {
     this.clearPendingProposals();
+    if (this.boundFallbackScopeMessage(operation)) {
+      return BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE;
+    }
     this.pending = this.recordCreateAgentRequester(operation);
     return describeSystemAgentPersistentOperation(this.pending);
   }
@@ -320,6 +327,10 @@ export class ChatTurnRouter {
     if (!isPersistentSystemAgentOperation(operation)) {
       throw new Error("OpenClaw host received a non-persistent approved operation.");
     }
+    const scopeMessage = this.boundFallbackScopeMessage(operation);
+    if (scopeMessage) {
+      return { text: scopeMessage, action: "none", applied: false };
+    }
     const capture = createCaptureRuntime();
     const result = await this.executeOperation(operation, capture, true, beforePersistentApply);
     const configWrite =
@@ -438,6 +449,11 @@ export class ChatTurnRouter {
   private async runOperation(operation: SystemAgentOperation): Promise<SystemAgentChatReply> {
     const recordedOperation = this.recordCreateAgentRequester(operation);
     await this.callbacks.requireVerifiedInference();
+    const scopeMessage = this.boundFallbackScopeMessage(recordedOperation);
+    if (scopeMessage) {
+      this.clearPendingProposals();
+      return { text: scopeMessage, action: "none", applied: false };
+    }
     // All inputs (typed commands and tool directives) enter
     // here before any wizard or handoff starts.
     if (this.options.operatorApprovalOnly && isSystemAgentNavigationOperation(recordedOperation)) {
@@ -578,7 +594,10 @@ export class ChatTurnRouter {
       if (approved && !configProof) {
         throw new SystemAgentInferenceUnavailableError("conversation");
       }
+      const boundFallbackModelRef =
+        this.callbacks.getVerifiedInference().execution.fallbackModelRef;
       return await execute(operation, capture, {
+        ...(boundFallbackModelRef !== undefined ? { boundFallbackModelRef } : {}),
         ...(configProof
           ? {
               expectedConfigRevision: configProof.expectedConfigRevision,
@@ -626,6 +645,13 @@ export class ChatTurnRouter {
     const capture = createCaptureRuntime();
     await executeSystemAgentOperation({ kind: "model-setup" }, capture);
     return { text: capture.read(), action: "none" };
+  }
+
+  private boundFallbackScopeMessage(operation: SystemAgentOperation): string | undefined {
+    return this.callbacks.getVerifiedInference().execution.fallbackModelRef !== undefined &&
+      !isSystemAgentBoundFallbackOperationAllowed(operation)
+      ? BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE
+      : undefined;
   }
 
   private commandDeps(): SystemAgentCommandDeps {

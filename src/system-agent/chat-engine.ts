@@ -22,6 +22,7 @@ import {
   type ChatWizardHostDependencies,
   type SystemAgentChatReply,
 } from "./chat-wizard-host.js";
+import { BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE } from "./fallback-operation-scope.js";
 import type {
   SystemAgentGreetingFacts,
   SystemAgentGreetingPlan,
@@ -86,6 +87,9 @@ export class SystemAgentChatEngine {
     this.wizard = new ChatWizardHost({
       surface: options.surface,
       beforePersistentApply: async (runtime) => {
+        if (this.verifiedInference.execution.fallbackModelRef !== undefined) {
+          throw new Error(BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE);
+        }
         await this.requirePersistentApplyInference(runtime);
       },
       dependencies: internals.wizardDependencies,

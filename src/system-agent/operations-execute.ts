@@ -8,6 +8,10 @@ import { isReservedSystemAgentId, SYSTEM_AGENT_ID } from "./agent-id.js";
 import { SYSTEM_AGENT_AUDIT_STORE_LABEL } from "./audit.js";
 import { redactSystemAgentConfig, resolveSystemAgentConfigSchema } from "./config-redaction.js";
 import {
+  BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE,
+  isSystemAgentBoundFallbackOperationAllowed,
+} from "./fallback-operation-scope.js";
+import {
   CONFIG_GET_OUTPUT_MAX_CHARS,
   CONFIG_SCHEMA_CHILDREN_MAX,
   applyPersistentOperation,
@@ -61,6 +65,13 @@ export async function executeSystemAgentOperation(
   runtime: RuntimeEnv,
   opts: ExecuteOptions = {},
 ): Promise<SystemAgentOperationResult> {
+  if (
+    opts.boundFallbackModelRef !== undefined &&
+    !isSystemAgentBoundFallbackOperationAllowed(operation)
+  ) {
+    runtime.log(BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE);
+    return { applied: false, message: BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE };
+  }
   switch (operation.kind) {
     case "none":
       runtime.log(operation.message);
@@ -620,7 +631,6 @@ export async function executeSystemAgentOperation(
                 "Gateway host lifecycle is unavailable. Use the service manager on the Gateway host.",
               );
             }
-            ctx.assertPersistentApply?.();
             await ctx.verifyPersistentApplyOwner?.();
             const result = await host.request(action, () => ctx.assertPersistentApply?.());
             if (!result.ok) {
