@@ -287,6 +287,7 @@ export async function runConfigOperations(params: {
   currentExpectation?: ConfigSetCurrentExpectation;
   beforePersistentApply?: () => void;
   expectedConfigRevision?: string;
+  verifyOwnerBeforeWrite?: () => Promise<void>;
 }) {
   const { runtime, operations, options } = params;
   if (
@@ -537,6 +538,10 @@ export async function runConfigOperations(params: {
     return;
   }
 
+  if (params.verifyOwnerBeforeWrite) {
+    await params.verifyOwnerBeforeWrite();
+    params.beforePersistentApply?.();
+  }
   await replaceConfigFile({
     sourceConfig: authoredNextConfig,
     snapshot,

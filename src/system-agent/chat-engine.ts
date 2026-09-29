@@ -1,11 +1,8 @@
 // OpenClaw chat engine: stable transport-agnostic facade over turn and wizard owners.
-import fs from "node:fs";
 import type {
   SystemAgentWizardCancel,
   WizardAnswer,
 } from "../../packages/gateway-protocol/src/index.js";
-import { readConfigFileSnapshotForWrite } from "../config/config.js";
-import { assertBaseSnapshotStillCurrent } from "../config/io.write-safety.js";
 import type { RuntimeEnv } from "../runtime.js";
 import {
   cleanupSystemAgentSession,
@@ -36,6 +33,7 @@ import {
 } from "./inference-error.js";
 import type { SystemAgentCommandDeps, SystemAgentOperation } from "./operations.js";
 import { loadSystemAgentOverview, type SystemAgentOverview } from "./overview.js";
+import { resolveSystemAgentPersistentApplyProof } from "./persistent-apply-proof.js";
 import { verifyConfigAfterSystemAgentWrite } from "./post-write-verification.js";
 import {
   resolveSystemAgentVerifiedInferenceRoute,
@@ -272,38 +270,13 @@ export class SystemAgentChatEngine {
       return this.throwInferenceUnavailable();
     }
     try {
-      // Bind route validation to the exact config/include revision that the
-      // operation's writer must later use as its base snapshot.
-      const before = await readConfigFileSnapshotForWrite({ observe: false });
-      const { resolvePersistentApplyInference } = await import("./setup-inference.js");
-      const route = await resolvePersistentApplyInference({
+      const proof = await resolveSystemAgentPersistentApplyProof({
         binding,
         runtime,
         deps: this.options.deps,
       });
-      if (route) {
-        const after = await readConfigFileSnapshotForWrite({ observe: false });
-        if (
-          !before.snapshot.valid ||
-          !after.snapshot.valid ||
-          !after.snapshot.hash ||
-          before.snapshot.path !== after.snapshot.path ||
-          before.snapshot.hash !== after.snapshot.hash
-        ) {
-          return this.throwInferenceUnavailable([], false);
-        }
-        return {
-          expectedConfigRevision: after.snapshot.hash,
-          // The store transaction does not alter config; the later config writer
-          // instead uses the pinned revision plus its own compare-and-swap.
-          assertConfigCurrent: () => {
-            after.writeOptions.assertConfigPathForWrite?.();
-            assertBaseSnapshotStillCurrent(after.snapshot, after.snapshot.path, fs, {
-              hashes: after.writeOptions.includeFileHashesForWrite ?? {},
-              targets: after.writeOptions.includeFileTargetsForWrite ?? {},
-            });
-          },
-        };
+      if (proof) {
+        return proof;
       }
     } catch (error) {
       if (isSystemAgentInferenceUnavailableError(error)) {

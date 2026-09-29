@@ -55,6 +55,7 @@ export async function runConfigSet(opts: {
   beforePersistentApply?: () => void;
   /** Exact verified maintenance revision; ordinary CLI writes omit it. */
   expectedConfigRevision?: string;
+  verifyOwnerBeforeWrite?: () => Promise<void>;
   /** Embedded recovery needs the writer's typed postcommit/rollback outcome. */
   throwOnError?: boolean;
 }) {
@@ -80,6 +81,7 @@ export async function runConfigSet(opts: {
       options: opts.cliOptions,
       successMode: "set",
       ...(currentExpectation ? { currentExpectation } : {}),
+      verifyOwnerBeforeWrite: opts.verifyOwnerBeforeWrite,
       ...(opts.beforePersistentApply ? { beforePersistentApply: opts.beforePersistentApply } : {}),
       ...(opts.expectedConfigRevision !== undefined
         ? { expectedConfigRevision: opts.expectedConfigRevision }
@@ -189,6 +191,7 @@ export async function runConfigUnset(opts: {
   runtime?: RuntimeEnv;
   beforePersistentApply?: () => void;
   expectedConfigRevision?: string;
+  verifyOwnerBeforeWrite?: () => Promise<void>;
 }) {
   const runtime = opts.runtime ?? defaultRuntime;
   const cliOptions = opts.cliOptions ?? {};
@@ -207,6 +210,7 @@ export async function runConfigUnset(opts: {
       operations: [buildUnsetOperation(pathTokens.map(String), pathTokens)],
       options: cliOptions,
       successMode: "set",
+      verifyOwnerBeforeWrite: opts.verifyOwnerBeforeWrite,
       ...(opts.beforePersistentApply ? { beforePersistentApply: opts.beforePersistentApply } : {}),
       ...(opts.expectedConfigRevision !== undefined
         ? { expectedConfigRevision: opts.expectedConfigRevision }

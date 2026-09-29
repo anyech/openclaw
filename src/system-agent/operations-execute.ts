@@ -367,6 +367,9 @@ export async function executeSystemAgentOperation(
               ...(ctx.expectedConfigRevision !== undefined
                 ? { expectedConfigRevision: ctx.expectedConfigRevision }
                 : {}),
+              ...(ctx.verifyPersistentApplyOwner
+                ? { verifyOwnerBeforeWrite: ctx.verifyPersistentApplyOwner }
+                : {}),
             }),
           );
           return { summary: `Removed config ${operation.path}`, details: { path: operation.path } };
@@ -617,6 +620,8 @@ export async function executeSystemAgentOperation(
                 "Gateway host lifecycle is unavailable. Use the service manager on the Gateway host.",
               );
             }
+            ctx.assertPersistentApply?.();
+            await ctx.verifyPersistentApplyOwner?.();
             const result = await host.request(action, () => ctx.assertPersistentApply?.());
             if (!result.ok) {
               throw new Error(result.error);

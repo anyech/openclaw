@@ -15,8 +15,10 @@ import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { SystemAgentChatEngine } from "./chat-engine.js";
 import { verifySystemAgentInferenceWithFallback } from "./inference-fallback.js";
 import { resolveSystemAgentConfiguredRouteFromConfig } from "./inference-route.js";
+import type { SystemAgentOverview } from "./overview.js";
 import type { ActivateSetupInferenceDeps } from "./setup-inference-core.js";
 import { resolvePersistentApplyInference, verifySetupInference } from "./setup-inference-turn.js";
+import { runSystemAgent } from "./system-agent.js";
 import { resolveSystemAgentVerifiedInferenceRoute } from "./verified-inference.js";
 
 const primary = "fixture-primary/first";
@@ -487,12 +489,38 @@ describe("bound maintenance configured model fallbacks", () => {
 });
 
 describe("bound fallback authorization at the real config writer", () => {
-  it.each(["stable", "revoke-before-final-write", "reassign-before-final-write"] as const)(
+  it.each([
+    "stable",
+    "auth-profile-stable",
+    "revoke-before-final-write",
+    "reassign-before-final-write",
+    "auth-profile-reassign-before-final-write",
+  ] as const)(
     "handles a %s configured fallback without crossing revoked authority",
     async (mode) => {
       await withOpenClawTestState({ label: "fallback-final-config-write" }, async (state) => {
         const config = configuredChain();
+        const pinned =
+          mode === "auth-profile-stable" || mode === "auth-profile-reassign-before-final-write";
+        if (pinned) {
+          config.agents!.defaults!.model = {
+            primary,
+            fallbacks: [backup + "@fixture-backup:pinned"],
+          };
+        }
         await state.writeConfig(config);
+        if (pinned) {
+          await state.writeAuthProfiles({
+            version: 1,
+            profiles: {
+              "fixture-backup:pinned": {
+                type: "api_key",
+                provider: "fixture-backup",
+                key: "stage-only-credential-v1",
+              },
+            },
+          });
+        }
         const fixture = probeFixture();
         const admitted = await verifySystemAgentInferenceWithFallback({
           requestingAgentId: "main",
@@ -503,7 +531,9 @@ describe("bound fallback authorization at the real config writer", () => {
         if (!admitted.ok) {
           throw new Error(admitted.error);
         }
-        expect(admitted.binding.execution.fallbackModelRef).toBe(backup);
+        expect(admitted.binding.execution.fallbackModelRef).toBe(
+          pinned ? backup + "@fixture-backup:pinned" : backup,
+        );
         let changedRaw: string | undefined;
         let finalGuardCalls = 0;
         const engine = new SystemAgentChatEngine({
@@ -511,16 +541,32 @@ describe("bound fallback authorization at the real config writer", () => {
           deps: {
             readConfigFileSnapshot: readSnapshot,
             runConfigSet: async (opts) => {
-              if (mode !== "stable") {
+              if (mode !== "stable" && mode !== "auth-profile-stable") {
                 if (mode === "revoke-before-final-write") {
                   config.agents!.defaults!.model = { primary, fallbacks: [] };
+                } else if (pinned) {
+                  await state.writeAuthProfiles({
+                    version: 1,
+                    profiles: {
+                      "fixture-backup:pinned": {
+                        type: "api_key",
+                        provider: "fixture-backup",
+                        key: "stage-only-credential-v2",
+                      },
+                    },
+                  });
+                  expect(
+                    await resolveSystemAgentVerifiedInferenceRoute(admitted.binding),
+                  ).toBeNull();
                 } else {
                   expectDefined(
                     config.models?.providers?.["fixture-backup"],
                     "bound backup provider",
                   ).apiKey = "rotated-fixture-key";
                 }
-                await state.writeConfig(config);
+                if (!pinned) {
+                  await state.writeConfig(config);
+                }
                 changedRaw = await fs.readFile(state.configPath, "utf8");
               }
               await runConfigSet(opts);
@@ -540,7 +586,7 @@ describe("bound fallback authorization at the real config writer", () => {
           });
           const after = await fs.readFile(state.configPath, "utf8");
           expect(finalGuardCalls).toBeGreaterThan(0);
-          if (mode === "stable") {
+          if (mode === "stable" || mode === "auth-profile-stable") {
             expect(reply?.applied).toBe(true);
             expect(JSON.parse(after).env?.vars?.PROOF_MARKER).toBe("stage-only");
           } else {
@@ -557,12 +603,181 @@ describe("bound fallback authorization at the real config writer", () => {
 });
 
 describe("bound fallback across SecretRef store and config writer", () => {
-  it.each(["stable", "revoke-before-store", "revoke-after-store"] as const)(
-    "keeps the %s two-effect recovery contract",
+  it.each([
+    "stable",
+    "auth-profile-stable",
+    "revoke-before-store",
+    "revoke-after-store",
+    "auth-profile-reassign-at-store-admission",
+  ] as const)("keeps the %s two-effect recovery contract", async (mode) => {
+    await withOpenClawTestState({ label: "fallback-secretref-two-effect" }, async (state) => {
+      const config = configuredChain();
+      const pinned =
+        mode === "auth-profile-stable" || mode === "auth-profile-reassign-at-store-admission";
+      if (pinned) {
+        config.agents!.defaults!.model = {
+          primary,
+          fallbacks: [backup + "@fixture-backup:pinned"],
+        };
+      }
+      config.gateway = { mode: "local", port: 19433 };
+      await state.writeConfig(config);
+      if (pinned) {
+        await state.writeAuthProfiles({
+          version: 1,
+          profiles: {
+            "fixture-backup:pinned": {
+              type: "api_key",
+              provider: "fixture-backup",
+              key: "stage-only-credential-v1",
+            },
+          },
+        });
+      }
+      const fixture = probeFixture();
+      const admitted = await verifySystemAgentInferenceWithFallback({
+        requestingAgentId: "main",
+        runtime,
+        deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+      });
+      expect(admitted.ok, JSON.stringify(admitted)).toBe(true);
+      if (!admitted.ok) {
+        throw new Error(admitted.error);
+      }
+      expect(admitted.binding.execution.fallbackModelRef).toBe(
+        pinned ? backup + "@fixture-backup:pinned" : backup,
+      );
+      const secret = "synthetic-stage-only-value";
+      let changedRaw: string | undefined;
+      let storedName: string | undefined;
+      let authorityChecks = 0;
+      const revoke = async () => {
+        config.agents!.defaults!.model = { primary, fallbacks: [] };
+        await state.writeConfig(config);
+        changedRaw = await fs.readFile(state.configPath, "utf8");
+      };
+      // Keep the real insert-only SQLite transaction and its transaction/commit
+      // admissions, replacing only the worker transport this unit lane lacks.
+      const storeSpy = vi
+        .spyOn(secretStore, "writeSecretStoreEntryForConfigRef")
+        .mockImplementation(async (params) => {
+          await params.verifyOwnerBeforeWrite?.();
+          if (mode === "auth-profile-reassign-at-store-admission") {
+            await state.writeAuthProfiles({
+              version: 1,
+              profiles: {
+                "fixture-backup:pinned": {
+                  type: "api_key",
+                  provider: "fixture-backup",
+                  key: "stage-only-credential-v2",
+                },
+              },
+            });
+            changedRaw = await fs.readFile(state.configPath, "utf8");
+          }
+          if (mode === "revoke-before-store") {
+            await revoke();
+          }
+          const name = writeSecretStoreEntryForConfigRefInDatabase(
+            { baseName: params.baseName, value: params.value, writer: params.updatedBy, now: 1 },
+            undefined,
+            () => params.assertCurrent?.(),
+          ).name;
+          storedName = name;
+          if (mode === "revoke-after-store") {
+            await revoke();
+          }
+          return name;
+        });
+      const engine = new SystemAgentChatEngine({ verifiedInference: admitted.binding });
+      try {
+        engine.propose({
+          kind: "config-set-ref",
+          path: "gateway.auth.token",
+          source: "store",
+          id: "STAGE_ONLY_TOKEN",
+          secret,
+        });
+        const proposal = engine.getPendingOperatorProposal();
+        expect(proposal).not.toBeNull();
+        const reply = await engine.resolveOperatorApproval("allow-once", proposal!.hash, () => {
+          authorityChecks += 1;
+        });
+        expect(authorityChecks).toBeGreaterThan(0);
+        const entries = secretStore.listSecretStoreEntries({
+          scope: { kind: "team" },
+          includeDeleted: true,
+        });
+        const after = await fs.readFile(state.configPath, "utf8");
+        expect(reply?.text).not.toContain(secret);
+        if (mode === "stable" || mode === "auth-profile-stable") {
+          expect(reply?.applied).toBe(true);
+          expect(entries).toHaveLength(1);
+          expect(JSON.parse(after).gateway?.auth?.token).toMatchObject({
+            source: "store",
+            id: storedName,
+          });
+        } else if (
+          mode === "revoke-before-store" ||
+          mode === "auth-profile-reassign-at-store-admission"
+        ) {
+          expect(reply?.applied).not.toBe(true);
+          expect(entries).toHaveLength(0);
+          expect(storedName).toBeUndefined();
+          expect(after).toBe(changedRaw);
+        } else {
+          expect(reply?.applied).not.toBe(true);
+          expect(entries.map((entry) => entry.name)).toEqual([storedName]);
+          expect(
+            secretStore.readSecretStoreValue({
+              scope: { kind: "team" },
+              name: storedName!,
+            }),
+          ).toEqual({ ok: true, value: secret });
+          expect(after).toBe(changedRaw);
+          expect(reply?.text).toContain("The entry was kept");
+          expect(reply?.text).toContain("reuse the saved entry");
+
+          // Recovery is a fresh, explicit SecretRef-only proposal after the
+          // original fallback route is restored; it must not store again.
+          config.agents!.defaults!.model = { primary, fallbacks: [backup] };
+          await state.writeConfig(config);
+          engine.propose({
+            kind: "config-set-ref",
+            path: "gateway.auth.token",
+            source: "store",
+            id: storedName!,
+          });
+          const recovery = engine.getPendingOperatorProposal();
+          expect(recovery).not.toBeNull();
+          const resumed = await engine.resolveOperatorApproval("allow-once", recovery!.hash, () => {
+            authorityChecks += 1;
+          });
+          expect(resumed?.applied).toBe(true);
+          expect(
+            secretStore
+              .listSecretStoreEntries({ scope: { kind: "team" } })
+              .map((entry) => entry.name),
+          ).toEqual([storedName]);
+          expect(
+            JSON.parse(await fs.readFile(state.configPath, "utf8")).gateway?.auth?.token,
+          ).toMatchObject({ source: "store", id: storedName });
+        }
+      } finally {
+        await engine.dispose();
+        storeSpy.mockRestore();
+        await closeOpenClawStateDatabaseAsync();
+      }
+    });
+  });
+});
+
+describe("bound fallback authorization at the one-shot config writer", () => {
+  it.each(["stable", "revoke-before-final-write"] as const)(
+    "keeps the %s one-shot write under its selected fallback",
     async (mode) => {
-      await withOpenClawTestState({ label: "fallback-secretref-two-effect" }, async (state) => {
+      await withOpenClawTestState({ label: "fallback-one-shot-final-write" }, async (state) => {
         const config = configuredChain();
-        config.gateway = { mode: "local", port: 19433 };
         await state.writeConfig(config);
         const fixture = probeFixture();
         const admitted = await verifySystemAgentInferenceWithFallback({
@@ -570,118 +785,59 @@ describe("bound fallback across SecretRef store and config writer", () => {
           runtime,
           deps: { readConfig: fixture.readConfig, verify: fixture.verify },
         });
-        expect(admitted.ok, JSON.stringify(admitted)).toBe(true);
         if (!admitted.ok) {
           throw new Error(admitted.error);
         }
-        expect(admitted.binding.execution.fallbackModelRef).toBe(backup);
-        const secret = "synthetic-stage-only-value";
-        let changedRaw: string | undefined;
-        let storedName: string | undefined;
-        let authorityChecks = 0;
-        const revoke = async () => {
-          config.agents!.defaults!.model = { primary, fallbacks: [] };
-          await state.writeConfig(config);
-          changedRaw = await fs.readFile(state.configPath, "utf8");
+        const overview: SystemAgentOverview = {
+          config: { path: state.configPath, exists: true, valid: true, issues: [], hash: null },
+          agents: [{ id: "main", isDefault: true, model: primary }],
+          defaultAgentId: "main",
+          defaultModel: primary,
+          tools: {
+            codex: { command: "codex", found: false, error: "stage" },
+            claude: { command: "claude", found: false, error: "stage" },
+            gemini: { command: "gemini", found: false, error: "stage" },
+            apiKeys: { openai: false, anthropic: false },
+          },
+          gateway: { url: "ws://127.0.0.1:19433", source: "isolated fixture", reachable: false },
+          references: {
+            docsUrl: "https://docs.openclaw.ai",
+            sourceUrl: "https://github.com/openclaw/openclaw",
+          },
         };
-        // Keep the real insert-only SQLite transaction and its transaction/commit
-        // admissions, replacing only the worker transport this unit lane lacks.
-        const storeSpy = vi
-          .spyOn(secretStore, "writeSecretStoreEntryForConfigRef")
-          .mockImplementation(async (params) => {
-            if (mode === "revoke-before-store") {
-              await revoke();
-            }
-            const name = writeSecretStoreEntryForConfigRefInDatabase(
-              { baseName: params.baseName, value: params.value, writer: params.updatedBy, now: 1 },
-              undefined,
-              () => params.assertCurrent?.(),
-            ).name;
-            storedName = name;
-            if (mode === "revoke-after-store") {
-              await revoke();
-            }
-            return name;
-          });
-        const engine = new SystemAgentChatEngine({ verifiedInference: admitted.binding });
-        try {
-          engine.propose({
-            kind: "config-set-ref",
-            path: "gateway.auth.token",
-            source: "store",
-            id: "STAGE_ONLY_TOKEN",
-            secret,
-          });
-          const proposal = engine.getPendingOperatorProposal();
-          expect(proposal).not.toBeNull();
-          const reply = await engine.resolveOperatorApproval("allow-once", proposal!.hash, () => {
-            authorityChecks += 1;
-          });
-          expect(authorityChecks).toBeGreaterThan(0);
-          const entries = secretStore.listSecretStoreEntries({
-            scope: { kind: "team" },
-            includeDeleted: true,
-          });
-          const after = await fs.readFile(state.configPath, "utf8");
-          expect(reply?.text).not.toContain(secret);
-          if (mode === "stable") {
-            expect(reply?.applied).toBe(true);
-            expect(entries).toHaveLength(1);
-            expect(JSON.parse(after).gateway?.auth?.token).toMatchObject({
-              source: "store",
-              id: storedName,
-            });
-          } else if (mode === "revoke-before-store") {
-            expect(reply?.applied).not.toBe(true);
-            expect(entries).toHaveLength(0);
-            expect(storedName).toBeUndefined();
-            expect(after).toBe(changedRaw);
-          } else {
-            expect(reply?.applied).not.toBe(true);
-            expect(entries.map((entry) => entry.name)).toEqual([storedName]);
-            expect(
-              secretStore.readSecretStoreValue({
-                scope: { kind: "team" },
-                name: storedName!,
-              }),
-            ).toEqual({ ok: true, value: secret });
-            expect(after).toBe(changedRaw);
-            expect(reply?.text).toContain("The entry was kept");
-            expect(reply?.text).toContain("reuse the saved entry");
-
-            // Recovery is a fresh, explicit SecretRef-only proposal after the
-            // original fallback route is restored; it must not store again.
-            config.agents!.defaults!.model = { primary, fallbacks: [backup] };
-            await state.writeConfig(config);
-            engine.propose({
-              kind: "config-set-ref",
-              path: "gateway.auth.token",
-              source: "store",
-              id: storedName!,
-            });
-            const recovery = engine.getPendingOperatorProposal();
-            expect(recovery).not.toBeNull();
-            const resumed = await engine.resolveOperatorApproval(
-              "allow-once",
-              recovery!.hash,
-              () => {
-                authorityChecks += 1;
+        let changedRaw: string | undefined;
+        const outcome = await runSystemAgent(
+          {
+            verifiedInference: admitted.binding,
+            message: "config set env.vars.PROOF_MARKER stage-only",
+            yes: true,
+            formatOverview: () => "Stage-only overview",
+            loadOverview: async () => overview,
+            deps: {
+              readConfigFileSnapshot: readSnapshot,
+              runConfigSet: async (opts) => {
+                if (mode === "revoke-before-final-write") {
+                  config.agents!.defaults!.model = { primary, fallbacks: [] };
+                  await state.writeConfig(config);
+                  changedRaw = await fs.readFile(state.configPath, "utf8");
+                }
+                await runConfigSet({ ...opts, throwOnError: true });
               },
-            );
-            expect(resumed?.applied).toBe(true);
-            expect(
-              secretStore
-                .listSecretStoreEntries({ scope: { kind: "team" } })
-                .map((entry) => entry.name),
-            ).toEqual([storedName]);
-            expect(
-              JSON.parse(await fs.readFile(state.configPath, "utf8")).gateway?.auth?.token,
-            ).toMatchObject({ source: "store", id: storedName });
-          }
-        } finally {
-          await engine.dispose();
-          storeSpy.mockRestore();
-          await closeOpenClawStateDatabaseAsync();
+            },
+          },
+          runtime,
+        ).then(
+          () => "applied",
+          () => "denied",
+        );
+        const after = await fs.readFile(state.configPath, "utf8");
+        if (mode === "stable") {
+          expect(outcome).toBe("applied");
+          expect(JSON.parse(after).env?.vars?.PROOF_MARKER).toBe("stage-only");
+        } else {
+          expect(changedRaw).toBeDefined();
+          expect(after).toBe(changedRaw);
+          expect(outcome).toBe("denied");
         }
       });
     },

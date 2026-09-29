@@ -18,6 +18,10 @@ import {
   type SystemAgentOverview,
 } from "./overview.js";
 import {
+  resolveSystemAgentPersistentApplyProof,
+  type SystemAgentPersistentApplyProof,
+} from "./persistent-apply-proof.js";
+import {
   hasCurrentSystemAgentOwnerPluginArtifacts,
   resolveSystemAgentVerifiedInferenceRoute,
   type SystemAgentVerifiedInferenceBinding,
@@ -92,19 +96,18 @@ async function requireVerifiedInference(opts: RunSystemAgentOptions): Promise<vo
 async function requirePersistentApplyInference(
   opts: RunSystemAgentOptions,
   runtime: RuntimeEnv,
-): Promise<void> {
+): Promise<SystemAgentPersistentApplyProof> {
   if (!opts.verifiedInference) {
     throw new SystemAgentInferenceUnavailableError("conversation");
   }
   try {
-    const { resolvePersistentApplyInference } = await import("./setup-inference.js");
-    const route = await resolvePersistentApplyInference({
+    const proof = await resolveSystemAgentPersistentApplyProof({
       binding: opts.verifiedInference,
       runtime,
       deps: opts.deps,
     });
-    if (route) {
-      return;
+    if (proof) {
+      return proof;
     }
   } catch (error) {
     if (error instanceof SystemAgentInferenceUnavailableError) {
@@ -127,11 +130,19 @@ async function runOneShot(
   // apply its result under a different inference owner.
   await requireVerifiedInference(opts);
   const approved = opts.yes === true || !isPersistentSystemAgentOperation(operation);
-  if (approved && isPersistentSystemAgentOperation(operation)) {
-    await requirePersistentApplyInference(opts, runtime);
-  }
+  const proof =
+    approved && isPersistentSystemAgentOperation(operation)
+      ? await requirePersistentApplyInference(opts, runtime)
+      : undefined;
   await executeSystemAgentOperation(operation, runtime, {
     approved,
+    ...(proof
+      ? {
+          expectedConfigRevision: proof.expectedConfigRevision,
+          assertVerifiedConfigCurrent: proof.assertConfigCurrent,
+          verifyPersistentApplyOwner: proof.assertOwnerCurrent,
+        }
+      : {}),
     deps: systemAgentCommandDepsFromOptions(opts),
   });
 }

@@ -68,6 +68,7 @@ type PersistentApplyGuard = () => void;
 type ConfigRevisionProof = {
   expectedConfigRevision: string;
   assertConfigCurrent: () => void;
+  assertOwnerCurrent: () => Promise<void>;
 };
 
 function isConfigRevisionProof(value: unknown): value is ConfigRevisionProof {
@@ -77,7 +78,9 @@ function isConfigRevisionProof(value: unknown): value is ConfigRevisionProof {
     "expectedConfigRevision" in value &&
     typeof value.expectedConfigRevision === "string" &&
     "assertConfigCurrent" in value &&
-    typeof value.assertConfigCurrent === "function"
+    typeof value.assertConfigCurrent === "function" &&
+    "assertOwnerCurrent" in value &&
+    typeof value.assertOwnerCurrent === "function"
   );
 }
 
@@ -572,11 +575,15 @@ export class ChatTurnRouter {
         ? await this.callbacks.requirePersistentApplyInference(capture)
         : undefined;
       const configProof = isConfigRevisionProof(verifiedRevision) ? verifiedRevision : undefined;
+      if (approved && !configProof) {
+        throw new SystemAgentInferenceUnavailableError("conversation");
+      }
       return await execute(operation, capture, {
         ...(configProof
           ? {
               expectedConfigRevision: configProof.expectedConfigRevision,
               assertVerifiedConfigCurrent: configProof.assertConfigCurrent,
+              verifyPersistentApplyOwner: configProof.assertOwnerCurrent,
             }
           : {}),
         approved,

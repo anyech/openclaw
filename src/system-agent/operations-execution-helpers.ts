@@ -28,28 +28,7 @@ import type { SystemAgentVerifiedInferenceBinding } from "./verified-inference.j
 export const CONFIG_GET_OUTPUT_MAX_CHARS = 2_000;
 export const CONFIG_SCHEMA_CHILDREN_MAX = 40;
 
-export function readConfigValueAtPath(
-  config: unknown,
-  path: string,
-): { found: boolean; value?: unknown } {
-  let current: unknown = config;
-  for (const part of parseConfigSetPath(path)) {
-    if (current === null || typeof current !== "object") {
-      return { found: false };
-    }
-    // Reads allow array properties and indices beyond the CLI writer's sparse-write limit.
-    const index = /^\d+$/.test(part) ? Number(part) : undefined;
-    if (index !== undefined && Array.isArray(current)) {
-      current = current[index];
-    } else {
-      current = (current as Record<string, unknown>)[part];
-    }
-    if (current === undefined) {
-      return { found: false };
-    }
-  }
-  return { found: true, value: current };
-}
+export { readConfigValueAtPath } from "./operations-parse.js";
 
 export function formatGatewayStatusLine(overview: SystemAgentOverview): string {
   return [
@@ -221,6 +200,8 @@ export type ExecuteOptions = {
   expectedConfigRevision?: string;
   /** Synchronous config fence for non-config store effects only; never postcommit config writes. */
   assertVerifiedConfigCurrent?: () => void;
+  /** Re-resolve the frozen credential owner at the side-effect boundary. */
+  verifyPersistentApplyOwner?: () => Promise<void>;
   /** Adopt the exact final binding after a verified model-route write commits. */
   onVerifiedInferenceChanged?: (binding: SystemAgentVerifiedInferenceBinding) => void;
 };
@@ -238,6 +219,7 @@ type PersistentApplyContext = {
   assertPersistentApply?: () => void;
   expectedConfigRevision?: string;
   assertVerifiedConfigCurrent?: () => void;
+  verifyPersistentApplyOwner?: () => Promise<void>;
   /** Re-check authority, then enter one persistent side-effect boundary. */
   commit<T>(effect: () => Promise<T> | T): Promise<T>;
 };
@@ -270,6 +252,10 @@ export async function applyPersistentOperation(params: {
   const assertPersistentApply = opts.beforePersistentApply;
   const commit: PersistentApplyContext["commit"] = async (effect) => {
     assertPersistentApply?.();
+    if (opts.verifyPersistentApplyOwner) {
+      await opts.verifyPersistentApplyOwner();
+      assertPersistentApply?.();
+    }
     return await effect();
   };
   const outcome = await params.run({
@@ -281,6 +267,9 @@ export async function applyPersistentOperation(params: {
       : {}),
     ...(opts.assertVerifiedConfigCurrent
       ? { assertVerifiedConfigCurrent: opts.assertVerifiedConfigCurrent }
+      : {}),
+    ...(opts.verifyPersistentApplyOwner
+      ? { verifyPersistentApplyOwner: opts.verifyPersistentApplyOwner }
       : {}),
     commit,
   });
@@ -329,6 +318,9 @@ export async function runConfigSetOperation(params: {
   const beforePersistentApply = ctx.assertPersistentApply
     ? { beforePersistentApply: ctx.assertPersistentApply }
     : {};
+  const liveOwner = ctx.verifyPersistentApplyOwner
+    ? { verifyOwnerBeforeWrite: ctx.verifyPersistentApplyOwner }
+    : {};
   const verifiedRevision =
     ctx.expectedConfigRevision !== undefined
       ? { expectedConfigRevision: ctx.expectedConfigRevision }
@@ -348,6 +340,7 @@ export async function runConfigSetOperation(params: {
             }),
         ...beforePersistentApply,
         ...verifiedRevision,
+        ...liveOwner,
       }),
     );
     return {};
@@ -387,6 +380,7 @@ export async function runConfigSetOperation(params: {
       // Re-check the requester and pinned fallback config at store transaction
       // and commit admission; the later config writer has its own revision CAS.
       assertCurrent: assertStoreCurrent,
+      ...liveOwner,
     }),
   );
   try {
@@ -395,6 +389,7 @@ export async function runConfigSetOperation(params: {
       cliOptions: { refProvider, refSource: "store", refId: storeEntry },
       ...beforePersistentApply,
       ...verifiedRevision,
+      ...liveOwner,
     });
   } catch (error) {
     // The writer can fail after publication and can decline or fail rollback.
@@ -683,6 +678,7 @@ export async function executeSetDefaultModel(
             }
             // The live probe can outlive the original OpenClaw authority.
             // Re-check it last, immediately before the writer crosses to disk.
+            await ctx.verifyPersistentApplyOwner?.();
             ctx.assertPersistentApply?.();
             persistedVerification = latestVerification;
             persistedBinding = latestBinding;

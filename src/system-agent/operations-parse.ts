@@ -47,6 +47,7 @@ export type SystemAgentCommandDeps = {
     cliOptions: ConfigSetOptions;
     beforePersistentApply?: () => void;
     expectedConfigRevision?: string;
+    verifyOwnerBeforeWrite?: () => Promise<void>;
   }) => Promise<void>;
   runConfigUnset?: typeof import("../cli/config-cli.js").runConfigUnset;
   runGatewayRestart?: () => Promise<void | boolean>;
@@ -634,4 +635,27 @@ function formatSetupPlanDescription(
 ): string {
   const workspace = shortenHomePath(resolveUserPath(operation.workspace ?? process.cwd()));
   return `bootstrap OpenClaw setup for workspace ${workspace}`;
+}
+
+export function readConfigValueAtPath(
+  config: unknown,
+  path: string,
+): { found: boolean; value?: unknown } {
+  let current: unknown = config;
+  for (const part of parseConfigSetPath(path)) {
+    if (current === null || typeof current !== "object") {
+      return { found: false };
+    }
+    // Reads allow array properties and indices beyond the CLI writer's sparse-write limit.
+    const index = /^\d+$/.test(part) ? Number(part) : undefined;
+    if (index !== undefined && Array.isArray(current)) {
+      current = current[index];
+    } else {
+      current = (current as Record<string, unknown>)[part];
+    }
+    if (current === undefined) {
+      return { found: false };
+    }
+  }
+  return { found: true, value: current };
 }
