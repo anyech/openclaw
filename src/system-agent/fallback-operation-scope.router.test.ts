@@ -9,17 +9,25 @@ import {
 import { ChatTurnRouter } from "./chat-turn-router.js";
 import { ChatWizardHost } from "./chat-wizard-host.js";
 import { BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE } from "./fallback-operation-scope.js";
+import { hashSystemAgentOperation, type SystemAgentProposalRef } from "./operator-approval.js";
 
-function createRouter(fallback: boolean, directive?: { kind: "approved-operation"; operation: { kind: "plugin-uninstall"; pluginId: string } }) {
+function createRouter(
+  fallback: boolean,
+  directive?: {
+    kind: "approved-operation";
+    operation: { kind: "plugin-uninstall"; pluginId: string };
+  },
+) {
   const base = expectDefined(sharedVerifiedInference, "verified route test fixture");
   const binding = fallback
     ? { ...base, execution: { ...base.execution, fallbackModelRef: "stage/backup" } }
     : base;
   const executeOperation = vi.fn(async () => ({ applied: true }));
+  const proposalRef: SystemAgentProposalRef = {};
   const session = {
     sessionId: "fallback-scope-test",
     verifiedInference: binding,
-    proposalRef: {},
+    proposalRef,
   };
   const router = new ChatTurnRouter(
     {
@@ -37,7 +45,7 @@ function createRouter(fallback: boolean, directive?: { kind: "approved-operation
       verifyConfigAfterWrite: async () => null,
     },
   );
-  return { router, executeOperation };
+  return { router, executeOperation, session };
 }
 
 describe("bound fallback early operation scope", () => {
@@ -85,6 +93,22 @@ describe("bound fallback early operation scope", () => {
       expect.anything(),
       expect.objectContaining({ boundFallbackModelRef: "stage/backup", approved: true }),
     );
+  });
+
+  it("drops a tool-staged restricted fallback operation before operator approval", async () => {
+    const { router, executeOperation, session } = createRouter(true);
+    const staged = { kind: "plugin-uninstall", pluginId: "unrelated-plugin" } as const;
+    session.proposalRef.operation = staged;
+    session.proposalRef.current = hashSystemAgentOperation(staged);
+    expect(router.getPendingOperatorProposal()).toBeNull();
+    expect(session.proposalRef.current).toBeUndefined();
+    expect(session.proposalRef.operation).toBeUndefined();
+    session.proposalRef.operation = staged;
+    session.proposalRef.current = hashSystemAgentOperation(staged);
+    const reply = await router.resolveTurn("yes");
+    expect(reply.applied).not.toBe(true);
+    expect(router.getPendingOperatorProposal()).toBeNull();
+    expect(executeOperation).not.toHaveBeenCalled();
   });
 
   it("does not narrow an independently verified primary owner", () => {

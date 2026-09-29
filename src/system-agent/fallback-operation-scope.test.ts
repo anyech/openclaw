@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createSystemAgentTestRuntime } from "./system-agent.runtime.test-support.js";
-import type { SystemAgentOperation } from "./operation-types.js";
 import {
   BOUND_FALLBACK_OPERATION_SCOPE_MESSAGE,
   isSystemAgentBoundFallbackOperationAllowed,
 } from "./fallback-operation-scope.js";
+import type { SystemAgentOperation } from "./operation-types.js";
 import { executeSystemAgentOperation } from "./operations-execute.js";
+import { createSystemAgentTestRuntime } from "./system-agent.runtime.test-support.js";
 
 const allowed: SystemAgentOperation[] = [
   { kind: "none", message: "read only" },

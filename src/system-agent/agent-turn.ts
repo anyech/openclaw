@@ -327,6 +327,7 @@ async function runSystemAgentTurnWithDeps(
   const directiveRef: { current?: SystemAgentTurnDirective } = {};
   const systemAgentTool = {
     agentId: plan.agentId,
+    ...(binding.execution.fallbackModelRef !== undefined ? { boundFallbackScope: true } : {}),
     surface: params.surface,
     approvalArmed: params.approvalArmed,
     ...(params.operatorApprovalOnly ? { operatorApprovalOnly: true } : {}),

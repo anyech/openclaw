@@ -169,6 +169,11 @@ export class ChatTurnRouter {
   }
 
   getPendingOperatorProposal(): { operation: SystemAgentOperation; hash: string } | null {
+    const staged = this.pending ?? this.agentSession.proposalRef.operation;
+    if (staged && this.boundFallbackScopeMessage(staged)) {
+      this.clearPendingProposals();
+      return null;
+    }
     const proposal = resolvePendingOperatorProposal(this.pending, this.agentSession.proposalRef);
     if (!proposal) {
       return null;
@@ -222,6 +227,7 @@ export class ChatTurnRouter {
       const result = await this.wizard.resolveReply(text);
       return { text: await this.finishWizardText(result), action: "none" };
     }
+    this.getPendingOperatorProposal();
     const trimmed = text.trim();
     if (!trimmed) {
       return {
@@ -387,6 +393,7 @@ export class ChatTurnRouter {
     approvalArmed: boolean,
     uiContext?: SystemAgentChatParams["context"],
   ): Promise<SystemAgentChatReply> {
+    this.getPendingOperatorProposal();
     const overview = await this.callbacks.loadOverview();
     const agentTurn = this.options.runAgentTurn ?? runSystemAgentTurn;
     const resolutionMarker = this.proposalResolution
