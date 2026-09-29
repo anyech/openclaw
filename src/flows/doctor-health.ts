@@ -132,6 +132,7 @@ async function runDoctorHealthFlowWithResult(
   let maintenance: Awaited<
     ReturnType<typeof import("../commands/doctor-maintenance.js").beginDoctorMaintenance>
   >;
+  let sqliteNoCowPaths: string[] = [];
   let exitCode: number | undefined;
   let healthContext: DoctorHealthFlowContext | undefined;
   let doctorResult: UpdatePostInstallDoctorResult = { status: "error" };
@@ -167,6 +168,7 @@ async function runDoctorHealthFlowWithResult(
       root,
       runtime: repairRuntime,
       assertCurrent: writeAuthority?.assertCurrent,
+      databaseGenerations: writeAuthority?.databaseGenerations,
     });
     const runChecks = async () => {
       const doctorRuntime = maintenance ? repairRuntime : effectiveRuntime;
@@ -204,6 +206,19 @@ async function runDoctorHealthFlowWithResult(
         databasePreflight && !refreshRecoveryInventory
           ? databasePreflight
           : await prepareDoctorDatabasePreflight();
+      const { inspectDoctorSqliteNoCow } = await import("../commands/doctor-sqlite-nocow.js");
+      const { resolveOpenClawStateSqlitePath } =
+        await import("../state/openclaw-state-db.paths.js");
+      const nocow = inspectDoctorSqliteNoCow([
+        resolveOpenClawStateSqlitePath(),
+        ...(schemas.agentDatabaseMigrationDiscovery?.discovery.targets.map(
+          (target) => target.path,
+        ) ?? []),
+      ]);
+      sqliteNoCowPaths = nocow.paths;
+      for (const message of nocow.notes) {
+        doctorRuntime.log(message);
+      }
       const { recordAgentDatabaseAdmissions } =
         await import("../state/agent-database-admission.js");
       // Repair owns fresh file decisions until its migration graph finishes.
@@ -270,6 +285,18 @@ async function runDoctorHealthFlowWithResult(
       }
       for (const message of deletionJournal.warnings) {
         effectiveRuntime.log(message);
+      }
+      if (prompter.shouldRepair && deletionJournal.warnings.length > 0) {
+        const failure = createUpdateFailureFact({
+          check: "agent-deletion-journal",
+          code: "unverified-agent-databases",
+          message: deletionJournal.warnings.join("\n"),
+        });
+        throw new DoctorMaintenanceRefusalError(
+          formatUpdateFailureFact(failure),
+          { kind: "data-at-risk", reason: "incomplete-migration" },
+          { failureFacts: [failure] },
+        );
       }
 
       // Keep side-effect-heavy legacy checks before structured contributions until fully migrated.
@@ -356,6 +383,9 @@ async function runDoctorHealthFlowWithResult(
     let failure: unknown;
     try {
       ctx = await (maintenance ? maintenance.run(runChecks) : runChecks());
+      if (ctx && maintenance && options.repair === true && sqliteNoCowPaths.length > 0) {
+        await maintenance.repairSqliteNoCow(sqliteNoCowPaths);
+      }
     } catch (error) {
       failure = error;
       throw error;
@@ -541,12 +571,19 @@ async function runDoctorHealthFlowWithResult(
         const warnings = normalizeUpdatePostInstallDoctorWarnings([
           ...contributionWarnings.slice(0, deferredCount),
           ...(doctorResult.warnings ?? []),
+          ...(maintenance?.warnings ?? []).filter(
+            (warning) => !doctorResult.warnings?.includes(warning),
+          ),
           ...contributionWarnings.slice(deferredCount),
         ]);
         await writeUpdatePostInstallDoctorResult({
           resultPath: updateResult.resultPath,
           result: {
             ...doctorResult,
+            ...(maintenance?.databaseWrites ? { databaseWrites: maintenance.databaseWrites } : {}),
+            ...(updateResult.capture.fileWrites
+              ? { configFileWrites: updateResult.capture.fileWrites }
+              : {}),
             ...(warnings.length ? { warnings } : {}),
             ...(updateResult.capture.configChanges.length
               ? { configChanges: updateResult.capture.configChanges }

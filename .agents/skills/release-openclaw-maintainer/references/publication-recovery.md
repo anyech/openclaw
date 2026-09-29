@@ -4,20 +4,26 @@ Use `$one-password` before any credential operation, and `$release-private`
 when available for maintainer credential locators. Core package publishing is
 GitHub OIDC trusted publishing; never substitute `NPM_TOKEN` or plugin OTP
 commands. GitHub's `npm-release` environment must be approved by
-`@openclaw/openclaw-release-managers` on the parent and on each npm child; the
-approved parent writes the attested release approval receipt that lets the
-ClawHub child run without its own gate.
+`@openclaw/openclaw-release-managers` once on the parent. Its attested approval
+receipt lets npm and ClawHub children skip their human gates. npm trusted
+publishers use `npm-publish`, which admits only protected `release-publish/*`
+tags. Direct human npm recovery keeps a separate `npm-release` approval job.
+Branch-based manual npm recovery (for example `--ref main`) is retired: mint or
+reuse the protected tooling tag with `pnpm release:publish-preflight ...
+--workflow-sha <tooling-sha>` (`ensureReleasePublishToolingTag`), then dispatch
+the npm child with `--ref release-publish/<tooling-sha12>-<epoch>`. On the
+receipt route each final `npm publish` re-verifies that the parent attempt is
+still live; a parent that completed, with any conclusion, refuses publication.
 
 The regular and extended-stable publish parent runs from the protected
 `release-publish/<tooling-sha12>-<epoch>` tag minted at the pinned Tooling SHA;
 use the regular candidate helper's printed command or the extended-stable
 publication reference for that track. Do not dispatch npm/plugin/ClawHub
 publication from a moving main parent. Docker-only recovery may use main.
-Extended-stable direct npm workflow recovery is a separate supported main route;
+Extended-stable direct npm workflow recovery also uses a protected tooling tag;
 follow [trusted-main npm recovery](extended-stable-publish.md#trusted-main-npm-recovery)
 for plugin source inputs and the matching core evidence handoff. It does not use
 the shared publish parent or authorize ClawHub publication.
-Tideclaw alpha uses its matching alpha branch and its owning skill.
 
 Publication promotes previously qualified bytes. Bind the successful Full
 Release Validation manifest, exact target SHA, successful attempt, and npm
@@ -122,11 +128,33 @@ rerun only failed verification jobs when the publisher succeeded; otherwise
 inspect its children and follow the recovery route above. Never repeat an
 uncertain dispatch or rerun all publication jobs to fix a download failure.
 
+With `wait_for_clawhub=false` the parent authorizes the ClawHub child and
+does not wait for it. The child publishes on its own and needs no approval.
+It revalidates that the parent is still active or succeeded, so a parent that
+fails first strands it. Watch the child until every package's
+`versions/<version>` returns 200. Seen in 2026.9.6: Convex 512 MB out-of-memory
+errors, runner ENOSPC, and curl timeouts. Recover only the failed packages,
+with `publish_scope=selected` and `plugins=<failed subset>`, from the original
+tooling tag and child identity. A package the ClawHub LLM scan flags
+`suspicious` still publishes; record it for the ClawHub owner. A bootstrap
+child (`plugin-clawhub-new.yml`) always waits for `clawhub-plugin-bootstrap`
+approval, once for validation and once for publication.
+
 Explicit ClawHub recovery uses `recovered_clawhub_run_id` and
 `recovered_clawhub_run_attempt` to name the original child. Keep the original
 parent's tooling, inputs, run ID, and attempt. Do not reuse an approval from another
 child. Docker-only recovery does not recover canceled ClawHub publication;
-verify and recover that surface separately.
+verify and recover that surface separately. Recover a failed Plugin ClawHub New
+bootstrap child through its [direct route](first-package.md), not a rerun.
+
+## Docker mirror
+
+The Vercel Container Registry mirror is advisory and fails without failing the
+parent. 2026.9.6 hit a stale 500 MB layer cap, which #156954 raised to 2 GB.
+After a failed mirror, dispatch `vercel-container-registry-publish.yml` from
+`main` with `version`, `include_browser`, and the `source_digests` block copied
+from the parent's mirror job log. Verify the `latest`, `main`, `slim`, and
+`browser` tags carry the version.
 
 ## Registry selectors
 

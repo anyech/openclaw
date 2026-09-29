@@ -28,6 +28,7 @@ import { withFirstStreamEventTimeout } from "../utils/stream-first-event-timeout
 import { createDeepSeekTextFilter } from "./deepseek-text-filter.js";
 import {
   createDsmlRecoverer,
+  type DeepSeekDsmlRecoveredPart,
   type RecoveredDeepSeekDsmlToolCall,
 } from "./openai-completions-dsml.js";
 import { getCompat } from "./openai-transport-params.js";
@@ -146,14 +147,13 @@ export async function processCompletionsStream(
     directMode && currentBlock && currentBlock.type !== "toolCall"
       ? (contentBlockIndices.get(currentBlock) ?? output.content.length - 1)
       : output.content.length - 1;
-  const measureUtf8Bytes = (text: string) => Buffer.byteLength(text, "utf8");
   let chunkPushedEvent = false;
   const pushStreamEvent = (event: AssistantMessageEvent) => {
     chunkPushedEvent = true;
     stream.push(event);
   };
   const queuePostToolCallDelta = (next: CompletionsReasoningDelta) => {
-    const nextBytes = measureUtf8Bytes(next.text);
+    const nextBytes = Buffer.byteLength(next.text, "utf8");
     if (pendingPostToolCallBytes + nextBytes > MAX_POST_TOOL_CALL_BUFFER_BYTES) {
       throw new Error("Exceeded post-tool-call delta buffer limit");
     }
@@ -162,17 +162,12 @@ export async function processCompletionsStream(
     if (
       !previous ||
       previous.kind !== next.kind ||
-      (previous.kind === "text" && next.kind === "text" && previous.source !== next.source)
+      (previous.kind === "text" && next.kind === "text" && previous.source !== next.source) ||
+      (previous.kind === "thinking" &&
+        next.kind === "thinking" &&
+        previous.signature !== next.signature)
     ) {
       pendingPostToolCallDeltas.push(next);
-      return;
-    }
-    if (next.kind === "thinking" && previous.kind === "thinking") {
-      if (previous.signature !== next.signature) {
-        pendingPostToolCallDeltas.push(next);
-        return;
-      }
-      previous.text += next.text;
       return;
     }
     previous.text += next.text;
@@ -333,59 +328,20 @@ export async function processCompletionsStream(
       partial: output,
     });
   };
+  const appendRecoveredParts = (recoveredParts: readonly DeepSeekDsmlRecoveredPart[]) => {
+    for (const recoveredPart of recoveredParts) {
+      if (recoveredPart.kind === "toolCall") {
+        appendRecoveredToolCall(recoveredPart);
+        continue;
+      }
+      const parts = deepSeekTextFilter?.push(recoveredPart.text) ?? [recoveredPart.text];
+      for (const part of parts) {
+        appendVisibleTextDelta(part);
+      }
+    }
+  };
   const appendFilteredVisibleTextDelta = (text: string) => {
-    const recoveredParts = deepSeekToolCallRecoverer?.push(text) ?? [
-      { kind: "text" as const, text },
-    ];
-    for (const recoveredPart of recoveredParts) {
-      if (recoveredPart.kind === "toolCall") {
-        appendRecoveredToolCall(recoveredPart);
-        continue;
-      }
-      const parts = deepSeekTextFilter?.push(recoveredPart.text) ?? [recoveredPart.text];
-      for (const part of parts) {
-        appendVisibleTextDelta(part);
-      }
-    }
-  };
-  const flushDeepSeekToolCallRecovererAtEnd = () => {
-    const recoveredParts = deepSeekToolCallRecoverer?.flush();
-    if (!recoveredParts) {
-      return;
-    }
-    for (const recoveredPart of recoveredParts) {
-      if (recoveredPart.kind === "toolCall") {
-        appendRecoveredToolCall(recoveredPart);
-        continue;
-      }
-      const parts = deepSeekTextFilter?.push(recoveredPart.text) ?? [recoveredPart.text];
-      for (const part of parts) {
-        appendVisibleTextDelta(part);
-      }
-    }
-  };
-  const flushDeepSeekTextFilterAtEnd = () => {
-    const parts = deepSeekTextFilter?.flush();
-    if (!parts) {
-      return;
-    }
-    for (const part of parts) {
-      appendVisibleTextDelta(part);
-    }
-  };
-  const appendRoutedContentDelta = (delta: CompletionsReasoningDelta) => {
-    if (delta.kind === "text") {
-      appendFilteredVisibleTextDelta(delta.text);
-      return;
-    }
-    if (!emitReasoning) {
-      return;
-    }
-    if (currentBlock?.type === "toolCall" && !directMode) {
-      queuePostToolCallDelta(delta);
-    } else {
-      appendThinkingDelta(delta);
-    }
+    appendRecoveredParts(deepSeekToolCallRecoverer?.push(text) ?? [{ kind: "text", text }]);
   };
   const appendPartitionedVisibleDelta = (delta: { kind: "text" | "thinking"; text: string }) => {
     if (delta.kind === "text") {
@@ -538,7 +494,13 @@ export async function processCompletionsStream(
         } else {
           const hasLaterVisibleText = contentDeltaIndex < lastVisibleTextIndex;
           beginReasoning(hasLaterVisibleText);
-          appendRoutedContentDelta(contentDelta);
+          if (emitReasoning) {
+            if (currentBlock?.type === "toolCall" && !directMode) {
+              queuePostToolCallDelta(contentDelta);
+            } else {
+              appendThinkingDelta(contentDelta);
+            }
+          }
         }
       }
       if (!hasReasoningThinking) {
@@ -649,8 +611,10 @@ export async function processCompletionsStream(
     throw new Error("Stream ended without finish_reason");
   }
   flushReasoningTagTextPartitioner();
-  flushDeepSeekToolCallRecovererAtEnd();
-  flushDeepSeekTextFilterAtEnd();
+  appendRecoveredParts(deepSeekToolCallRecoverer?.flush() ?? []);
+  for (const part of deepSeekTextFilter?.flush() ?? []) {
+    appendVisibleTextDelta(part);
+  }
   currentBlock = null;
   flushPendingPostToolCallDeltas();
   // Only an explicit stop or observed SSE terminal may authorize silent tool calls.

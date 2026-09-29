@@ -66,7 +66,7 @@ const gatewaySessionServerMethodFiles = [
   "src/gateway/server-methods/sessions-subscriptions.ts",
 ];
 
-export const migratedSessionTranscriptReaderFiles = new Set([
+const migratedSessionTranscriptReaderFiles = new Set([
   "src/agents/main-session-recovery/main-session-restart-recovery-store.ts",
   "src/agents/subagents/announce/subagent-announce-output.test.ts",
   "src/agents/subagents/announce/subagent-announce-output.ts",
@@ -216,31 +216,22 @@ export function findSessionTranscriptReaderBoundaryViolations(
       }
     }
 
-    if (ts.isPropertyAccessExpression(node)) {
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const receiver = unwrapExpression(node.expression);
+      const name = ts.isPropertyAccessExpression(node)
+        ? node.name
+        : ts.isStringLiteral(node.argumentExpression)
+          ? node.argumentExpression
+          : undefined;
       if (
         ts.isIdentifier(receiver) &&
         legacyNamespaces.has(receiver.text) &&
-        transcriptReaderNames.has(node.name.text)
+        name &&
+        transcriptReaderNames.has(name.text)
       ) {
         violations.push({
-          line: toLine(sourceFile, node.name),
-          reason: `references legacy transcript reader "${node.name.text}"`,
-        });
-      }
-    }
-
-    if (ts.isElementAccessExpression(node)) {
-      const receiver = unwrapExpression(node.expression);
-      if (
-        ts.isIdentifier(receiver) &&
-        legacyNamespaces.has(receiver.text) &&
-        ts.isStringLiteral(node.argumentExpression) &&
-        transcriptReaderNames.has(node.argumentExpression.text)
-      ) {
-        violations.push({
-          line: toLine(sourceFile, node.argumentExpression),
-          reason: `references legacy transcript reader "${node.argumentExpression.text}"`,
+          line: toLine(sourceFile, name),
+          reason: `references legacy transcript reader "${name.text}"`,
         });
       }
     }

@@ -70,7 +70,8 @@ vi.mock("../../infra/install-source-utils.js", async (importOriginal) => ({
   resolveNpmSpecMetadata: mocks.npmMetadata,
 }));
 
-vi.mock("../../infra/update-runner-git-recovery.js", () => ({
+vi.mock("../../infra/update-runner-git-recovery.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../infra/update-runner-git-recovery.js")>()),
   readCurrentGitUpdateRecovery: mocks.readGitRecovery,
 }));
 
@@ -117,7 +118,7 @@ vi.mock("./update-command-service.js", async () => {
   return {
     maybeRestartServiceAfterFailedMutableUpdate: mocks.maybeRestartService,
     maybeStopManagedServiceBeforeMutableUpdate: mocks.maybeStopService,
-    shouldBlockMutableUpdateFromGatewayServiceEnv: mocks.shouldBlockServiceUpdate,
+    mutableUpdateGatewayServiceBlock: mocks.shouldBlockServiceUpdate,
     UpdateCommandAbort: actual.UpdateCommandAbort,
     resolveUpdatedGatewayRestartPort,
   };

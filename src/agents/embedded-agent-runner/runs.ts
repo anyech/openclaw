@@ -1,6 +1,3 @@
-/**
- * Manages active embedded-agent run handles, queues, aborts, and waiters.
- */
 import fs from "node:fs";
 import path from "node:path";
 import { resolveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
@@ -52,6 +49,7 @@ import { logMessageQueuedWithBacklogPolicy } from "../../logging/diagnostic-runt
 import { diagnosticLogger as diag, logSessionStateChange } from "../../logging/diagnostic.js";
 import { hasPromptImageInput } from "../../media/prompt-image-input.js";
 import { normalizeAgentId, parseAgentSessionKey } from "../../routing/session-key.js";
+import { createDeferredCore } from "../../shared/deferred.js";
 import { resolveSessionAgentId } from "../agent-scope.js";
 import { QuestionAnswerUnconfirmedError } from "../harness/gateway-question-dispatch.js";
 import { resolveSessionPlacementForcedTerminalSettlement } from "../session-placement-forced-terminal-settlement.js";
@@ -82,6 +80,11 @@ import {
   type EmbeddedRunWaiter,
   type EmbeddedAgentQueueFailureReason,
 } from "./run-state.js";
+import {
+  canSteerEmbeddedRunDuringCompaction,
+  isEmbeddedRunHandleAbortable,
+  isEmbeddedRunHandleSupersedable,
+} from "./runs.probes.js";
 
 export type { EmbeddedAgentQueueHandle, EmbeddedAgentQueueMessageOptions } from "./run-state.js";
 
@@ -485,32 +488,6 @@ function resolveEmbeddedInjection(
   }
 }
 
-function isEmbeddedRunHandleAbortable(
-  sessionId: string,
-  handle: EmbeddedAgentQueueHandle,
-): boolean {
-  try {
-    return handle.isAbortable?.() !== false;
-  } catch (err) {
-    diag.warn(
-      `abort failed: sessionId=${sessionId} reason=abortable_check_failed err=${String(err)}`,
-    );
-    return false;
-  }
-}
-
-function isEmbeddedRunHandleSupersedable(runId: string, handle: EmbeddedAgentQueueHandle): boolean {
-  if (!isEmbeddedRunHandleAbortable(runId, handle)) {
-    return false;
-  }
-  try {
-    return handle.isStopped?.() !== true && handle.isAborted?.() !== true;
-  } catch (err) {
-    diag.warn(`supersede failed: runId=${runId} reason=lifecycle_check_failed err=${String(err)}`);
-    return false;
-  }
-}
-
 export function isEmbeddedAgentRunAbortableForRunId(runId: string): boolean {
   const normalizedRunId = runId.trim();
   if (!normalizedRunId) {
@@ -536,6 +513,10 @@ export function supersedeEmbeddedAgentRunByRunId(runId: string, beforeCancel: ()
       handle.cancel("superseded");
     } else {
       handle.abort();
+    }
+    const registration = ACTIVE_EMBEDDED_RUN_REGISTRATIONS.get(handle);
+    if (registration) {
+      notifyEmbeddedRunEnded(registration.sessionId, handle, true);
     }
     return true;
   }
@@ -626,7 +607,56 @@ export async function queueGuardedEmbeddedAgentMessageWithOutcomeAsync(
   options: ReplyMessageInjectionOptions | undefined,
   canInject: () => boolean,
 ): Promise<EmbeddedAgentQueueMessageOutcome> {
-  return queueEmbeddedAgentMessageAsync(sessionId, text, options, canInject);
+  const handle = ACTIVE_EMBEDDED_RUNS.get(sessionId);
+  const onQueueSettled = options?.onQueueSettled;
+  if (!handle || !onQueueSettled) {
+    return queueEmbeddedAgentMessageAsync(sessionId, text, options, canInject);
+  }
+  // Bind custody before dispatch: a backend can accept synchronously, then end
+  // without reporting per-input settlement. Never follow a same-session successor.
+  const waiters = EMBEDDED_RUN_WAITERS.get(sessionId) ?? new Set<EmbeddedRunWaiter>();
+  const operation = resolveActiveReplyOperationForSessionId(sessionId);
+  const abortSignal =
+    operation && getAttachedBackend(operation) === handle ? operation.abortSignal : undefined;
+  let settled = false;
+  const close = (notify: boolean) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    waiters.delete(waiter);
+    if (waiters.size === 0 && EMBEDDED_RUN_WAITERS.get(sessionId) === waiters) {
+      EMBEDDED_RUN_WAITERS.delete(sessionId);
+    }
+    abortSignal?.removeEventListener("abort", settle);
+    if (notify) {
+      onQueueSettled();
+    }
+  };
+  const settle = () => close(true);
+  const waiter: EmbeddedRunWaiter = { handle, resolve: settle, settleOnAbort: true };
+  waiters.add(waiter);
+  EMBEDDED_RUN_WAITERS.set(sessionId, waiters);
+  abortSignal?.addEventListener("abort", settle, { once: true });
+  if (abortSignal?.aborted || handle.isAborted?.()) {
+    settle();
+  }
+  try {
+    const outcome = await queueEmbeddedAgentMessageAsync(
+      sessionId,
+      text,
+      { ...options, onQueueSettled: settle },
+      canInject,
+    );
+    if (!outcome.queued) {
+      // Admission can retry without transcript waiting; rejection never owns custody.
+      close(false);
+    }
+    return outcome;
+  } catch (error) {
+    close(false);
+    throw error;
+  }
 }
 
 async function queueEmbeddedAgentMessageAsync(
@@ -691,6 +721,7 @@ async function queueEmbeddedAgentMessageAsync(
         try {
           if (await claimPendingUserInputAnswer(text, options)) {
             options.onQueueAccepted?.(true);
+            options.onQueueSettled?.();
             logActiveRunMessageAccepted(sessionId);
             return {
               queued: true,
@@ -775,7 +806,7 @@ function prepareEmbeddedAgentQueueMessage(
     diag.debug(`queue message failed: sessionId=${sessionId} reason=stale_run`);
     return reject("stale_run");
   }
-  if (handle.isCompacting()) {
+  if (!canSteerEmbeddedRunDuringCompaction(sessionId, handle)) {
     diag.debug(`queue message failed: sessionId=${sessionId} reason=compacting`);
     return reject("compacting");
   }
@@ -887,6 +918,7 @@ export function abortEmbeddedAgentRun(
       return false;
     }
     revokeCompletionClaim(sessionId, handle.runId);
+    notifyEmbeddedRunEnded(sessionId, handle, true);
     return true;
   }
 
@@ -902,16 +934,14 @@ export function abortEmbeddedAgentRun(
   });
   let aborted = false;
   for (const [id, handle] of ACTIVE_EMBEDDED_RUNS) {
-    if (replyOwnedSessionIds.has(id) || (mode === "compacting" && !handle.isCompacting())) {
-      continue;
-    }
-    if (!isEmbeddedRunHandleAbortable(id, handle)) {
+    if (replyOwnedSessionIds.has(id) || !isEmbeddedRunHandleAbortable(id, handle, mode)) {
       continue;
     }
     diag.debug(`aborting ${mode === "compacting" ? "compacting " : ""}run: sessionId=${id}`);
     try {
       handle.abort(opts?.reason);
       revokeCompletionClaim(id, handle.runId);
+      notifyEmbeddedRunEnded(id, handle, true);
       aborted = true;
     } catch (err) {
       diag.warn(`abort failed: sessionId=${id} err=${String(err)}`);
@@ -959,16 +989,9 @@ export function prepareEmbeddedAgentRunCompletionClaim(
   resolveCurrentRegistration: () => EmbeddedRunCompletionRegistration | undefined;
   registered: Promise<EmbeddedRunCompletionRegistration | undefined>;
 } {
-  let registrationSettled = false;
   let settleRegistration!: (registration: EmbeddedRunCompletionRegistration | undefined) => void;
   const registered = new Promise<EmbeddedRunCompletionRegistration | undefined>((resolve) => {
-    settleRegistration = (registration) => {
-      if (registrationSettled) {
-        return;
-      }
-      registrationSettled = true;
-      resolve(registration);
-    };
+    settleRegistration = resolve;
   });
   const claim: EmbeddedRunCompletionClaim = {
     runId,
@@ -1221,6 +1244,7 @@ function projectActiveEmbeddedRunOwner(
           handle.abort();
         }
         revokeCompletionClaim(registration.sessionId, runId);
+        notifyEmbeddedRunEnded(registration.sessionId, handle, true);
         return true;
       } catch {
         return false;
@@ -1273,11 +1297,7 @@ export function resolveActiveEmbeddedRunHandleSessionIdBySessionFile(
   return ACTIVE_EMBEDDED_RUN_SESSION_IDS_BY_FILE.get(normalizedSessionFile);
 }
 
-export function resolveActiveEmbeddedRunSessionIdBySessionFile(
-  sessionFile: string,
-): string | undefined {
-  return resolveActiveEmbeddedRunHandleSessionIdBySessionFile(sessionFile);
-}
+export { resolveActiveEmbeddedRunHandleSessionIdBySessionFile as resolveActiveEmbeddedRunSessionIdBySessionFile };
 
 export function getActiveEmbeddedRunSnapshot(
   sessionId: string,
@@ -1382,20 +1402,14 @@ export async function abortAndDrainEmbeddedAgentRun(params: {
   ) {
     return { aborted: false, drained: false, forceCleared: false };
   }
-  let releaseStaleExpiryBarrier: (() => void) | undefined;
-  const staleExpiryBarrier =
-    params.reason === "stuck_recovery"
-      ? new Promise<void>((resolve) => {
-          releaseStaleExpiryBarrier = resolve;
-        })
-      : undefined;
+  const staleExpiryBarrier = params.reason === "stuck_recovery" ? createDeferredCore() : undefined;
   // Recovery is a staleness expiry: stamp run_stalled on the reply operation
   // BEFORE any handle abort, or the run loop's abort handler re-enters
   // abortByUser and misattributes the watchdog kill to the user.
   const expiredReplyRun =
     params.reason === "stuck_recovery" &&
     expireStaleReplyRunBySessionId(params.sessionId, "stuck_recovery", {
-      afterClearBarrier: staleExpiryBarrier,
+      afterClearBarrier: staleExpiryBarrier?.promise,
       followupAdmissionBarrierTimeout: settleMs + 1_000,
     });
   const stampedStaleReplyRun =
@@ -1461,7 +1475,7 @@ export async function abortAndDrainEmbeddedAgentRun(params: {
   } finally {
     // Queue drains registered on the stale owner must not start while its
     // backend can still claim the same session and requeue the adopted turn.
-    releaseStaleExpiryBarrier?.();
+    staleExpiryBarrier?.resolve();
   }
 }
 
@@ -1552,7 +1566,11 @@ async function persistForceClearedEmbeddedRunTerminalState(params: {
   }
 }
 
-function notifyEmbeddedRunEnded(sessionId: string, endedHandle: EmbeddedAgentQueueHandle) {
+function notifyEmbeddedRunEnded(
+  sessionId: string,
+  endedHandle: EmbeddedAgentQueueHandle,
+  aborted = false,
+) {
   const waiters = EMBEDDED_RUN_WAITERS.get(sessionId);
   if (!waiters || waiters.size === 0) {
     return;
@@ -1560,6 +1578,9 @@ function notifyEmbeddedRunEnded(sessionId: string, endedHandle: EmbeddedAgentQue
   const sessionIdle = !ACTIVE_EMBEDDED_RUNS.has(sessionId);
   diag.debug(`notifying waiters: sessionId=${sessionId} waiterCount=${waiters.size}`);
   for (const waiter of waiters) {
+    if (aborted && !waiter.settleOnAbort) {
+      continue;
+    }
     if (waiter.handle ? waiter.handle !== endedHandle : !sessionIdle) {
       continue;
     }

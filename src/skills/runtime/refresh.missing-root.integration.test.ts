@@ -9,6 +9,7 @@ import chokidar from "chokidar";
 import { afterEach, describe, expect, it, onTestFailed, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { createDeferredCore } from "../../shared/deferred.js";
+import { loadWorkspaceSkills } from "../loading/workspace-skill-loader.js";
 import { resolveSkillsWatcherUsePolling } from "./refresh-watch-path.js";
 import { shouldUseNativeSkillsWatcher } from "./refresh-watch-transport.js";
 import {
@@ -30,7 +31,6 @@ it.each(["initial", "closed", "disabled", "evicted"] as const)(
     const skillFile = path.join(skillDir, "SKILL.md");
     const { ensureSkillsWatcher, closeSkillsWatchers } = await import("./refresh.js");
     const { getSkillsSnapshotVersion } = await import("./refresh-state.js");
-    const { loadWorkspaceSkills } = await import("../loading/workspace-skill-loader.js");
     const options = { config: {}, agentId: "main" };
     try {
       await fs.mkdir(skillDir, { recursive: true });
@@ -89,7 +89,6 @@ it.each(["create", "edit"] as const)(
     const contents = (description: string) =>
       `---\nname: scan-proof\ndescription: ${description}\n---\n`;
     const { ensureSkillsWatcher, closeSkillsWatchers } = await import("./refresh.js");
-    const { loadWorkspaceSkills } = await import("../loading/workspace-skill-loader.js");
     const options = { config: {}, agentId: "main" };
     try {
       await fs.mkdir(path.dirname(skillDir), { recursive: true });
@@ -253,7 +252,7 @@ describe("shared missing skill ancestors", () => {
       const observed: ObservedSkillsWatcher[] = [];
       const watcherErrors: unknown[] = [];
       let controlledLoss:
-        | { sourceRoot: string; generationStart: number; phase: string }
+        | { sourceRoot: string; generationStart: number; generationEnd?: number; phase: string }
         | undefined;
       const contentErrors: Array<{
         error: unknown;
@@ -374,8 +373,7 @@ describe("shared missing skill ancestors", () => {
       phase = "import refresh owner";
       const { ensureSkillsWatcher, closeSkillsWatchers, registerSkillsChangeListener } =
         await import("./refresh.js");
-      phase = "import skill loader";
-      const { loadWorkspaceSkills } = await import("../loading/workspace-skill-loader.js");
+      phase = "import refresh state";
       const { getSkillsSourceVersion } = await import("./refresh-state.js");
       const originalWatch = chokidar.watch;
       const watch = vi.spyOn(chokidar, "watch").mockImplementation((...args) => {
@@ -468,7 +466,10 @@ describe("shared missing skill ancestors", () => {
           expect(actualContentErrors[index]).toBe(error);
           assert.ok(loss, errorPhase);
           assert.ok(error instanceof Error && "code" in error && "path" in error);
-          expect(error.code).toBe("ENOENT");
+          // Windows may report EPERM while scanning a removed directory. Bind errors
+          // to generations present when the deliberate removal completed.
+          assert.ok(loss.generationEnd !== undefined, loss.phase);
+          expect(observed.slice(0, loss.generationEnd)).toContain(observation);
           assert.ok(typeof error.path === "string");
           expect(path.resolve(error.path)).toBe(loss.sourceRoot);
           expect(observation.watcher.closed).toBe(true);
@@ -627,6 +628,7 @@ describe("shared missing skill ancestors", () => {
           phase = "rename watched ancestor";
           await fs.rename(movedAncestor, `${movedAncestor}-away`);
         }
+        controlledLoss.generationEnd = observed.length;
         phase = "discover removed ancestor";
         await expect.poll(() => read(first), { timeout: 3_000 }).toEqual([]);
         await writeSkill(first, "returned-proof");
@@ -794,6 +796,7 @@ describe("shared missing skill ancestors", () => {
           phase,
         };
         await fs.rm(path.join(root, "right"), { recursive: true });
+        controlledLoss.generationEnd = observed.length;
         phase = "discover removed sibling ancestor";
         await expect.poll(() => read(second), { timeout: 3_000 }).toEqual([]);
         await writeSkill(second, "recreated-proof");
@@ -901,7 +904,6 @@ describe("shared missing skill ancestors", () => {
     syncBuiltinESMExports();
     const { ensureSkillsWatcher } = await import("./refresh.js");
     const { getSkillsSourceVersion } = await import("./refresh-state.js");
-    const { loadWorkspaceSkills } = await import("../loading/workspace-skill-loader.js");
     const read = () =>
       loadWorkspaceSkills(workspaceDir, {
         config,
