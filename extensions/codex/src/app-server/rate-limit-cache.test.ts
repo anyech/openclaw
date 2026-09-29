@@ -1,5 +1,6 @@
 // Codex tests cover physical-client rate-limit snapshot ownership and rolling merges.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ensureCodexAppServerClientRuntime } from "./client-runtime.js";
 import type { CodexAppServerClient } from "./client.js";
 import {
   mergeCodexRateLimitsUpdate,
@@ -7,6 +8,7 @@ import {
   readRecentCodexRateLimits,
   rememberCodexRateLimitsRead,
 } from "./rate-limit-cache.js";
+import { createClientHarness } from "./test-support.js";
 
 function clientIdentity(): CodexAppServerClient {
   return {} as unknown as CodexAppServerClient;
@@ -120,5 +122,31 @@ describe("Codex rate-limit cache", () => {
         codex_other: mergedOtherSnapshot,
       },
     });
+  });
+
+  it("shares physical-client notification snapshots across same-build module copies", async () => {
+    const harness = createClientHarness();
+    try {
+      const addNotificationHandler = vi.spyOn(harness.client, "addNotificationHandler");
+      ensureCodexAppServerClientRuntime(harness.client, { agentDir: "/tmp/agent" });
+
+      vi.resetModules();
+      const nextRuntime = await import("./client-runtime.js");
+      const nextCache = await import("./rate-limit-cache.js");
+      nextRuntime.ensureCodexAppServerClientRuntime(harness.client, { agentDir: "/tmp/agent" });
+      expect(addNotificationHandler).toHaveBeenCalledTimes(1);
+
+      harness.send({
+        method: "account/rateLimits/updated",
+        params: { rateLimits: { limitId: "codex", primary: { usedPercent: 90 } } },
+      });
+      await vi.waitFor(() => expect(readCodexRateLimitsRevision(harness.client)).toBe(1));
+      expect(nextCache.readCodexRateLimitsRevision(harness.client)).toBe(1);
+      expect(nextCache.readRecentCodexRateLimits(harness.client)).toMatchObject({
+        rateLimits: { limitId: "codex", primary: { usedPercent: 90 } },
+      });
+    } finally {
+      harness.client.close();
+    }
   });
 });
