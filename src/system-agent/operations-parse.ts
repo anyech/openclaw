@@ -651,6 +651,7 @@ export function readConfigValueAtPath(
     if (index !== undefined && Array.isArray(current)) {
       current = current[index];
     } else {
+      // SAFETY: current passed the non-null object guard; dynamic property reads have unknown values.
       current = (current as Record<string, unknown>)[part];
     }
     if (current === undefined) {

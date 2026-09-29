@@ -87,6 +87,34 @@ describe("model-facing bound fallback operation admission", () => {
     }
   });
 
+  it("advertises only executable actions and fields for the verified fallback", () => {
+    const scoped = createSystemAgentTool({ surface: "gateway", boundFallbackScope: true });
+    const schema = JSON.stringify(scoped.parameters);
+    for (const action of [
+      ...forbidden.map(({ args }) => args.action),
+      "connect_channel",
+      "configure_gateway",
+      "import_memory",
+      "plugin_activate_artifact",
+    ]) {
+      expect(schema).not.toContain('"' + action + '"');
+      expect(scoped.description).not.toContain(action);
+    }
+    for (const action of [
+      "status",
+      "plugin_list",
+      "gateway_status",
+      "config_set",
+      "config_set_ref",
+    ]) {
+      expect(schema).toContain('"' + action + '"');
+      expect(scoped.description).toContain(action);
+    }
+    const primary = createSystemAgentTool({ surface: "gateway" });
+    expect(JSON.stringify(primary.parameters)).toContain('"plugin_install"');
+    expect(primary.description).toContain("plugin_install");
+  });
+
   it("does not change independently verified primary proposal authority", async () => {
     const proposalRef: NonNullable<SystemAgentToolOptions["proposalRef"]> = {};
     const tool = createSystemAgentTool({ surface: "gateway", proposalRef });
