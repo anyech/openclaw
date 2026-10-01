@@ -33,6 +33,7 @@ import {
   assertSubagentRegistryWriteSourceCurrent,
   captureSubagentRunMutationSnapshot,
   publishSubagentRunPostimages,
+  replaceSubagentRunRecord,
 } from "./subagent-registry-persistence.js";
 import { completeTerminalEffects } from "./subagent-registry-terminal-effects.js";
 import type { SubagentCompletionRequest, SubagentRunRecord } from "./subagent-registry.types.js";
@@ -56,9 +57,6 @@ async function loadCleanupBrowserSessionsForLifecycleEnd(): Promise<BrowserClean
 
 function shouldPreservePublishedExplicitRunTimeout(entry: SubagentRunRecord): boolean {
   if (
-    typeof entry.runTimeoutSeconds !== "number" ||
-    !Number.isFinite(entry.runTimeoutSeconds) ||
-    entry.runTimeoutSeconds <= 0 ||
     entry.execution.outcome?.status !== "timeout" ||
     typeof entry.execution.endedAt !== "number"
   ) {
@@ -75,19 +73,6 @@ function shouldPreservePublishedExplicitRunTimeout(entry: SubagentRunRecord): bo
     entry.delivery?.status === "delivered" ||
     typeof entry.delivery?.announcedAt === "number"
   );
-}
-
-function resolveExpiredExplicitRunDeadlineMs(params: {
-  entry: SubagentRunRecord;
-  nextEndedAt: number;
-  observedStartedAt?: number;
-}): number | undefined {
-  const effectiveEndedAt = resolveSubagentRunEffectiveEndedAt(
-    params.entry,
-    params.nextEndedAt,
-    params.observedStartedAt,
-  );
-  return effectiveEndedAt < params.nextEndedAt ? effectiveEndedAt : undefined;
 }
 
 function isOlderEquivalentTerminalCallback(params: {
@@ -170,6 +155,7 @@ export async function completeSubagentRunAttempt(
         entry.childSessionKey,
         assertCurrent,
         entry.execution.transcriptTarget,
+        entry.childAgentId,
       );
       if (
         (completeParams.recoveryCurrent && !(await completeParams.recoveryCurrent.prepare())) ||
@@ -189,6 +175,7 @@ export async function completeSubagentRunAttempt(
         previous: new Map([[currentEntry, previous]]),
         context: stateContext,
         persist: params.persistAsyncOrThrow,
+        withPublication: collectorSession?.withPublication,
         assertCurrent: () => {
           assertCurrent();
           collectorSession?.assertCurrent();
@@ -196,15 +183,6 @@ export async function completeSubagentRunAttempt(
         onPublished,
       });
       return result.publication === "published";
-    };
-    const restoreEntrySnapshot = (snapshot?: SubagentRunRecord) => {
-      if (!snapshot) {
-        return;
-      }
-      for (const key of Object.keys(currentEntry)) {
-        Reflect.deleteProperty(currentEntry, key);
-      }
-      Object.assign(currentEntry, snapshot);
     };
     const recoveryRequested = completeParams.recoverInterrupted === true;
     if (
@@ -357,15 +335,11 @@ export async function completeSubagentRunAttempt(
       Number.isFinite(completeParams.startedAt)
         ? completeParams.startedAt
         : undefined;
-    const expiredDeadlineMs = recoveryRequested
-      ? undefined
-      : resolveExpiredExplicitRunDeadlineMs({
-          entry,
-          nextEndedAt: endedAt,
-          observedStartedAt,
-        });
-    if (expiredDeadlineMs !== undefined) {
-      endedAt = expiredDeadlineMs;
+    const effectiveEndedAt = recoveryRequested
+      ? endedAt
+      : resolveSubagentRunEffectiveEndedAt(entry, endedAt, observedStartedAt);
+    if (effectiveEndedAt < endedAt) {
+      endedAt = effectiveEndedAt;
       completionOutcome = { status: "timeout" };
       completionReason = SUBAGENT_ENDED_REASON_COMPLETE;
     }
@@ -423,7 +397,7 @@ export async function completeSubagentRunAttempt(
       entry.killReconciliation !== undefined
     ) {
       const killReconciliation = entry.killReconciliation;
-      const stableTaskCancellation = entry.killReconciliation?.taskCancellationAccepted === true;
+      const stableTaskCancellation = killReconciliation.taskCancellationAccepted === true;
       const cancellationEndedAt = resolveKilledSubagentTaskEndedAt(entry);
       const completionPredatesCancellation =
         typeof cancellationEndedAt === "number" && endedAt < cancellationEndedAt;
@@ -663,7 +637,7 @@ export async function completeSubagentRunAttempt(
         entry.suppressCompletionDelivery = true;
       }
       const liveBeforeCommit = captureSubagentRunMutationSnapshot(currentEntry);
-      restoreEntrySnapshot(entry);
+      replaceSubagentRunRecord(currentEntry, entry);
       entry = currentEntry;
       if (!(await commit(liveBeforeCommit, () => context.bumpCleanupGeneration(currentEntry)))) {
         return;
@@ -678,7 +652,7 @@ export async function completeSubagentRunAttempt(
     // Only the canonical state/capture transition is serialized. Cleanup
     // remains re-entrant so a stalled browser close cannot strand a duplicate callback.
     releaseCompletionLock();
-    collectorSession?.release();
+    await collectorSession?.release();
   }
 
   if (!entry) {

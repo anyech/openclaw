@@ -1,15 +1,13 @@
 import type { TemplateResult } from "lit";
+import type { ChatMessageGetResult } from "../../../../../packages/gateway-protocol/src/schema/logs-chat.js";
 import type { ToolCard } from "../../../lib/chat/chat-types.ts";
 import type { ChatMediaPlaybackMode } from "./chat-media-playback.ts";
 import type { ArtifactDownloadResolver } from "./chat-message-media.ts";
-import type { SessionDiffFileTextLoader, SessionDiffLoader } from "./session-diff-panel.ts";
-
-type DetailUnavailableReason = "not_found" | "oversized" | "not_visible";
-type DetailFullMessageResult = {
-  ok?: boolean;
-  message?: unknown;
-  unavailableReason?: DetailUnavailableReason;
-};
+import type {
+  SessionDiffFileTextLoader,
+  SessionDiffLoader,
+  SessionDiffOwner,
+} from "./session-diff-panel.ts";
 
 type SidebarFullMessageRequest = {
   sessionKey: string;
@@ -20,7 +18,7 @@ type SidebarFullMessageRequest = {
 
 export type SidebarFullMessageLoader = (
   request: SidebarFullMessageRequest,
-) => Promise<DetailFullMessageResult | null | undefined>;
+) => Promise<Partial<ChatMessageGetResult> | null | undefined>;
 
 type MarkdownSidebarContent = {
   kind: "markdown";
@@ -95,7 +93,7 @@ type AttachmentSidebarContent = Omit<AttachmentSidebarSource, "src"> & {
 
 type SessionDiffSidebarContent = {
   kind: "session-diff";
-  /** Fetches a fresh sessions.diff snapshot; the panel refetches on refresh. */
+  owner: SessionDiffOwner;
   load: SessionDiffLoader;
   loadFileText?: SessionDiffFileTextLoader;
   openFile?: (path: string) => void;

@@ -1,7 +1,7 @@
 import { html } from "lit";
 import type { GatewaySessionRow } from "../../api/types.ts";
 import type { ApplicationGatewaySnapshot } from "../../app/gateway.ts";
-import { hasOperatorReadAccess, hasOperatorWriteAccess } from "../../app/operator-access.ts";
+import { hasOperatorWriteAccess } from "../../app/operator-access.ts";
 import { t } from "../../i18n/index.ts";
 import { registerModelControlsEnglish } from "../../i18n/locales/en-model-controls.ts";
 import { storedChatOutboxScopeKey } from "../../lib/chat/outbox-store.ts";
@@ -84,7 +84,7 @@ export function readChatPaneComposerAccess(
         sessionScope: true,
         session,
       }).allowed);
-  return { canCompose: hasOperatorReadAccess(auth) || canSend, canSend };
+  return { canCompose: canSend, canSend };
 }
 
 export function readChatPaneMutationAccess(
@@ -108,6 +108,24 @@ export function readChatPaneMutationAccess(
     }),
     permission: scopedPatchAccess({ permissionMode: "guarded" }),
     unarchive: scopedPatchAccess({ archived: false }),
+  };
+}
+
+export function readChatPublicationAccess(
+  snapshot: ApplicationGatewaySnapshot,
+  session: GatewaySessionRow,
+  participationBlocked: boolean,
+) {
+  const canMutate = !session.archived && !participationBlocked;
+  return {
+    canPublishShared:
+      canMutate &&
+      readSessionMethodAccess(snapshot, {
+        method: "sessions.github.publish",
+        requiredScope: "operator.sessions.write",
+        session,
+      }).allowed,
+    canPublishPersonal: canMutate && hasOperatorWriteAccess(snapshot.hello?.auth ?? null),
   };
 }
 
