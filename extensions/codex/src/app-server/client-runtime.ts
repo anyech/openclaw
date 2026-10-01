@@ -26,6 +26,8 @@ import { isJsonObject, type CodexServiceTier, type JsonObject } from "./protocol
 import { mergeCodexRateLimitsUpdate } from "./rate-limit-cache.js";
 import { withTimeout } from "./timeout.js";
 
+type ThreadRelease = CodexAppServerLiveThreadOwnership["release"];
+
 type ClientRuntimeContext = CodexAppServerAuthProfileLookup & {
   authMode?: "prepared-api-key" | "profile";
   onAuthRefreshFailure?: () => void;
@@ -51,14 +53,8 @@ const CODEX_EXTERNAL_AUTH_REFRESH_TIMEOUT_MS = 9_000;
 const { configuredClients, physicalThreadReleases, claimedThreadReleaseTokens } =
   defineCodexBuildState("openclaw.codexAppServerClientRuntime", () => ({
     configuredClients: new WeakMap<CodexAppServerClient, ClientRuntime>(),
-    physicalThreadReleases: new WeakMap<
-      CodexAppServerLiveThreadOwnership["release"],
-      CodexAppServerLiveThreadOwnership["release"]
-    >(),
-    claimedThreadReleaseTokens: new WeakMap<
-      CodexAppServerLiveThreadOwnership["release"],
-      ThreadOwnerToken
-    >(),
+    physicalThreadReleases: new WeakMap<ThreadRelease, ThreadRelease>(),
+    claimedThreadReleaseTokens: new WeakMap<ThreadRelease, ThreadOwnerToken>(),
   }))();
 
 /** Only an initialized, still-open physical client can own retained native subscriptions. */
