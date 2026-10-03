@@ -947,7 +947,12 @@ class GatewayBootstrapAuthTest {
         authMethod = null,
         server = server,
         onConnect = { role, params ->
-          val token = params["auth"]?.jsonObject?.get("token")?.jsonPrimitive?.content
+          val token =
+            params["auth"]
+              ?.jsonObject
+              ?.get("token")
+              ?.jsonPrimitive
+              ?.content
           connectFrames += role to token
           when (connectCount.incrementAndGet()) {
             2 -> initialConnects.complete(Unit)
@@ -3170,7 +3175,8 @@ class GatewayBootstrapAuthTest {
   }
 
   private fun testCertificateFingerprint(certificate: X509Certificate): String =
-    MessageDigest.getInstance("SHA-256")
+    MessageDigest
+      .getInstance("SHA-256")
       .digest(certificate.encoded)
       .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
@@ -3179,8 +3185,10 @@ class GatewayBootstrapAuthTest {
     private val selectedAlias: AtomicReference<String>,
     private val serverHandshakes: AtomicInteger,
   ) : X509ExtendedKeyManager() {
-    override fun getClientAliases(keyType: String?, issuers: Array<Principal>?): Array<String>? =
-      delegate.getClientAliases(keyType, issuers)
+    override fun getClientAliases(
+      keyType: String?,
+      issuers: Array<Principal>?,
+    ): Array<String>? = delegate.getClientAliases(keyType, issuers)
 
     override fun chooseClientAlias(
       keyType: Array<String>?,
@@ -3188,8 +3196,10 @@ class GatewayBootstrapAuthTest {
       socket: Socket?,
     ): String? = delegate.chooseClientAlias(keyType, issuers, socket)
 
-    override fun getServerAliases(keyType: String?, issuers: Array<Principal>?): Array<String>? =
-      delegate.getServerAliases(keyType, issuers)
+    override fun getServerAliases(
+      keyType: String?,
+      issuers: Array<Principal>?,
+    ): Array<String>? = delegate.getServerAliases(keyType, issuers)
 
     override fun chooseServerAlias(
       keyType: String?,
