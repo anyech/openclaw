@@ -4599,14 +4599,9 @@ class NodeRuntime private constructor(
         }
         return@launchGatewayLifecycle
       }
-      finishGatewayConnectionOperation(intent)
-      updateStatus {
-        operatorStatusText = "Connecting…"
-        operatorConnectionProblem = null
-      }
-      connectWithAuth(endpoint = endpoint, auth = resolveGatewayConnectAuth(endpoint)) {
-        beginConnectAttempt(endpoint)
-      }
+      // An explicit refresh must re-enter the normal connect owner so retained TLS endpoints
+      // re-run the established probe and trust decision before any session reconnects.
+      launchConnect(endpoint, explicitAuth = null, intent = intent)
     }
   }
 

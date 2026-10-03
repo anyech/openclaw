@@ -101,6 +101,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -811,6 +812,92 @@ class GatewayBootstrapAuthTest {
       assertEquals("shared-token", readField<String?>(desired, "token"))
       assertEquals(newFingerprint, prefs.loadGatewayTlsFingerprint(endpoint.stableId))
       assertTrue("Pin approval must preserve the selection waiting on this attempt", freshSelection.isCurrent())
+    }
+
+  @Test
+  fun refreshGatewayConnection_promptsBeforeReplacingRetainedTlsFingerprint() =
+    runBlocking {
+      val probeCalls = AtomicInteger()
+      val oldFingerprint = "aa".repeat(32)
+      val newFingerprint = "bb".repeat(32)
+      val initialToken = "initial-explicit-token"
+      val savedRefreshToken = "saved-refresh-token"
+      // A deterministic probe sequence models a rotated peer certificate at the trust boundary.
+      val (_, prefs, runtime) =
+        gatewayFixture { _, _ ->
+          GatewayTlsProbeResult(
+            fingerprintSha256 =
+              if (probeCalls.getAndIncrement() == 0) oldFingerprint else newFingerprint,
+          )
+        }
+      neutralizeColdStartAutoConnect(runtime)
+      val endpoint = tlsGatewayEndpoint()
+      prefs.gatewayRegistry.upsert(gatewayRegistryEntry(endpoint, null))
+      prefs.saveGatewayCredentials(endpoint.stableId, token = savedRefreshToken)
+
+      val nodeSession = readField<GatewaySession>(runtime, "nodeSession")
+      val operatorSession = readField<GatewaySession>(runtime, "operatorSession")
+      val nodeTransport = installStalledTransport(nodeSession, completeOnCancel = true)
+      val operatorTransport = installStalledTransport(operatorSession, completeOnCancel = true)
+
+      runtime.connect(endpoint, auth(token = initialToken))
+      val firstPrompt =
+        withTimeout(5_000) {
+          runtime.pendingGatewayTrust.first { it?.fingerprintSha256 == oldFingerprint }
+        }!!
+      assertEquals(initialToken, firstPrompt.auth.token)
+      assertNull(prefs.loadGatewayTlsFingerprint(endpoint.stableId))
+
+      runtime.acceptGatewayTrustPrompt(firstPrompt)
+      withTimeout(5_000) { runtime.pendingGatewayTrust.first { it == null } }
+      // GatewaySession.connect stores desired before launching the loop; each existing test
+      // transport's CompletableDeferred is the deterministic readiness signal, not polling.
+      withTimeout(5_000) { nodeTransport.created.await() }
+      withTimeout(5_000) { operatorTransport.created.await() }
+
+      val existingNodeDesired = checkNotNull(desiredConnection(runtime, "nodeSession"))
+      val existingOperatorDesired = checkNotNull(desiredConnection(runtime, "operatorSession"))
+      assertEquals(endpoint.stableId, readField<GatewayEndpoint>(existingNodeDesired, "endpoint").stableId)
+      assertEquals(endpoint.stableId, readField<GatewayEndpoint>(existingOperatorDesired, "endpoint").stableId)
+      assertEquals(initialToken, readField<String?>(existingNodeDesired, "token"))
+      assertEquals(initialToken, readField<String?>(existingOperatorDesired, "token"))
+      assertEquals(oldFingerprint, prefs.loadGatewayTlsFingerprint(endpoint.stableId))
+      assertEquals(endpoint.stableId, readField<GatewayEndpoint?>(runtime, "connectedEndpoint")?.stableId)
+
+      runtime.refreshGatewayConnection()
+
+      val changedPrompt =
+        withTimeout(5_000) {
+          runtime.pendingGatewayTrust.first { it?.fingerprintSha256 == newFingerprint }
+        }!!
+      assertEquals(endpoint, changedPrompt.endpoint)
+      assertEquals(savedRefreshToken, changedPrompt.auth.token)
+      assertNull(changedPrompt.auth.bootstrapToken)
+      assertNull(changedPrompt.auth.password)
+      assertEquals(oldFingerprint, changedPrompt.previousFingerprintSha256)
+      assertEquals(oldFingerprint, prefs.loadGatewayTlsFingerprint(endpoint.stableId))
+      assertEquals(2, probeCalls.get())
+      assertTrue(
+        "Node desired config must not be replaced before trust consent",
+        existingNodeDesired === desiredConnection(runtime, "nodeSession"),
+      )
+      assertTrue(
+        "Operator desired config must not be replaced before trust consent",
+        existingOperatorDesired === desiredConnection(runtime, "operatorSession"),
+      )
+
+      runtime.declineGatewayTrustPrompt(changedPrompt)
+      withTimeout(5_000) { runtime.pendingGatewayTrust.first { it == null } }
+
+      assertEquals(oldFingerprint, prefs.loadGatewayTlsFingerprint(endpoint.stableId))
+      assertTrue(
+        "Node desired config must remain after trust decline",
+        existingNodeDesired === desiredConnection(runtime, "nodeSession"),
+      )
+      assertTrue(
+        "Operator desired config must remain after trust decline",
+        existingOperatorDesired === desiredConnection(runtime, "operatorSession"),
+      )
     }
 
   @Test
@@ -2742,12 +2829,17 @@ class GatewayBootstrapAuthTest {
     val cancelled: CompletableDeferred<Unit> = CompletableDeferred(),
   )
 
-  private fun installStalledTransport(session: GatewaySession): StalledGatewayTransport {
+  private fun installStalledTransport(
+    session: GatewaySession,
+    completeOnCancel: Boolean = false,
+  ): StalledGatewayTransport {
     val stalled = StalledGatewayTransport()
     val factory: (OkHttpClient, Request, WebSocketListener) -> WebSocket =
       { _, request, listener ->
         val socket =
           object : WebSocket {
+            private val cancellationDelivered = AtomicBoolean(false)
+
             override fun request(): Request = request
 
             override fun queueSize(): Long = 0
@@ -2763,6 +2855,10 @@ class GatewayBootstrapAuthTest {
 
             override fun cancel() {
               stalled.cancelled.complete(Unit)
+              if (completeOnCancel && cancellationDelivered.compareAndSet(false, true)) {
+                // Match OkHttp cancellation so each replaced transport can settle its owned work.
+                listener.onFailure(this, IOException("test transport cancelled"), null)
+              }
             }
           }
         stalled.created.complete(socket to listener)
