@@ -3,7 +3,11 @@ import type { Context, Model, StreamFn } from "@openclaw/llm-core";
 import { isLoopbackIpAddress } from "@openclaw/net-policy/ip";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createOpenAIResponsesTransportStreamFn } from "../../packages/ai/src/transports/openai-responses-client.js";
-import { createDeferred } from "../../test/helpers/promise.js";
+import {
+  awaitGateBeforeSettlement,
+  createDeferred,
+  withinTest,
+} from "../../test/helpers/promise.js";
 import { resolveEmbeddedSessionLane } from "../agents/embedded-agent-runner/lanes.js";
 import { wrapStreamFnWithDiagnosticModelCallEvents } from "../agents/embedded-agent-runner/run/attempt.model-diagnostic-events.js";
 import {
@@ -36,7 +40,6 @@ import { resetDiagnosticStateForTest } from "./diagnostic.test-support.js";
 
 const REQUEST_TIMEOUT_MS = 1_000;
 const STUCK_ABORT_MS = 500;
-const FIXTURE_GUARD_MS = 2_000;
 const OWNER_START_MS = Date.parse("2026-10-04T00:00:00.000Z");
 
 type FixtureOutcome = { stopReason?: string; error?: unknown };
@@ -151,21 +154,6 @@ async function createResponsesLoopbackFixture(): Promise<ResponsesLoopbackFixtur
   };
 }
 
-function withinFixtureDeadline<T>(promise: Promise<T>, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const guard = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () => reject(new Error("Loopback fixture timed out: " + label)),
-      FIXTURE_GUARD_MS,
-    );
-  });
-  return Promise.race([promise, guard]).finally(() => {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
-  });
-}
-
 function createModel(baseUrl: string): Model<"openai-responses"> {
   return {
     id: "loopback-responses-model",
@@ -254,7 +242,9 @@ afterEach(() => {
 });
 
 describe("Responses request deadline recovery at real HTTP", () => {
-  it("preserves the current retry allowance, then recovers the registered owner", async () => {
+  it("preserves the current retry allowance, then recovers the registered owner", async ({
+    signal,
+  }) => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(OWNER_START_MS);
     setDiagnosticsEnabledForProcess(true);
@@ -305,19 +295,33 @@ describe("Responses request deadline recovery at real HTTP", () => {
       }
     });
     try {
-      await withinFixtureDeadline(activeEntered.promise, "active owner registration");
+      await withinTest(
+        awaitGateBeforeSettlement(
+          activeEntered.promise,
+          activeRun,
+          "owner settled before registration",
+        ),
+        signal,
+      );
       requestController = firstController;
       firstSettlement = settleModelStream(
         streamFn(model, context, streamOptions(firstController.signal)),
       );
-      await withinFixtureDeadline(fixture.firstRequestReceived, "first Responses POST");
+      await withinTest(
+        awaitGateBeforeSettlement(
+          fixture.firstRequestReceived,
+          firstSettlement,
+          "request settled before first HTTP entry",
+        ),
+        signal,
+      );
       expect(fixture.requests).toHaveLength(1);
 
       // Keep the first socket open while the diagnostic recovery allowance elapses,
       // then fail it at the boundary to model the network reset that starts the retry.
       vi.setSystemTime(OWNER_START_MS + REQUEST_TIMEOUT_MS);
       fixture.failFirstRequest();
-      expectFailedOutcome(await withinFixtureDeadline(firstSettlement, "first request reset"));
+      expectFailedOutcome(await withinTest(firstSettlement, signal));
       await waitForDiagnosticEventsDrained();
       expect(
         getDiagnosticSessionActivitySnapshot(ref).activeModelCallRecoveryDeadlineAtMs,
@@ -329,9 +333,13 @@ describe("Responses request deadline recovery at real HTTP", () => {
       ).finally(() => {
         secondCallSettled = true;
       });
-      await withinFixtureDeadline(
-        fixture.secondRequestReceived,
-        "second same-owner Responses POST",
+      await withinTest(
+        awaitGateBeforeSettlement(
+          fixture.secondRequestReceived,
+          secondSettlement,
+          "request settled before second HTTP entry",
+        ),
+        signal,
       );
       await waitForDiagnosticEventsDrained();
       expect(fixture.requests).toHaveLength(2);
@@ -371,7 +379,7 @@ describe("Responses request deadline recovery at real HTTP", () => {
       expect(isRepeatedModelRequestStalled(exhaustedActivity, STUCK_ABORT_MS)).toBe(true);
       expect(secondCallSettled).toBe(false);
 
-      const recovered = await withinFixtureDeadline(
+      const recovered = await withinTest(
         recoverStuckDiagnosticSession({
           sessionKey: ref.sessionKey,
           ageMs: 2 * REQUEST_TIMEOUT_MS,
@@ -379,11 +387,11 @@ describe("Responses request deadline recovery at real HTTP", () => {
           allowActiveAbort: true,
           repeatedRequestNoProgressAbortMs: STUCK_ABORT_MS,
         }),
-        "eligible owner recovery",
+        signal,
       );
       expect(recovered).toMatchObject({ status: "aborted", action: "abort_embedded_run" });
       expect(handle.abort).toHaveBeenCalledOnce();
-      expectFailedOutcome(await withinFixtureDeadline(secondSettlement, "owner cancellation"));
+      expectFailedOutcome(await withinTest(secondSettlement, signal));
       await waitForDiagnosticEventsDrained();
       expect(fixture.requests).toHaveLength(2);
     } finally {
@@ -392,12 +400,12 @@ describe("Responses request deadline recovery at real HTTP", () => {
       releaseActive.resolve();
       try {
         if (secondSettlement && !secondCallSettled) {
-          await withinFixtureDeadline(secondSettlement, "second request cleanup");
+          await withinTest(secondSettlement, signal);
         }
         if (firstSettlement) {
-          await withinFixtureDeadline(firstSettlement, "first request cleanup");
+          await withinTest(firstSettlement, signal);
         }
-        await withinFixtureDeadline(activeRun, "registered owner cleanup");
+        await withinTest(activeRun, signal);
       } finally {
         clearActiveEmbeddedRun(ref.sessionId, handle, ref.sessionKey);
         closeDiagnosticEmbeddedRunOwner(owner);
@@ -406,7 +414,9 @@ describe("Responses request deadline recovery at real HTTP", () => {
     }
   });
 
-  it("clears cumulative no-progress age after a real semantic Responses result", async () => {
+  it("clears cumulative no-progress age after a real semantic Responses result", async ({
+    signal,
+  }) => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(OWNER_START_MS);
     setDiagnosticsEnabledForProcess(true);
@@ -430,24 +440,32 @@ describe("Responses request deadline recovery at real HTTP", () => {
       firstSettlement = settleModelStream(
         streamFn(model, context, streamOptions(firstController.signal)),
       );
-      await withinFixtureDeadline(fixture.firstRequestReceived, "first Responses POST");
+      await withinTest(
+        awaitGateBeforeSettlement(
+          fixture.firstRequestReceived,
+          firstSettlement,
+          "request settled before first HTTP entry",
+        ),
+        signal,
+      );
       vi.setSystemTime(OWNER_START_MS + REQUEST_TIMEOUT_MS);
       fixture.failFirstRequest();
-      expectFailedOutcome(await withinFixtureDeadline(firstSettlement, "first request reset"));
+      expectFailedOutcome(await withinTest(firstSettlement, signal));
       await waitForDiagnosticEventsDrained();
 
       const second = streamFn(model, context, streamOptions(secondController.signal));
       secondSettlement = settleModelStream(second);
-      await withinFixtureDeadline(
-        fixture.secondRequestReceived,
-        "second same-owner Responses POST",
+      await withinTest(
+        awaitGateBeforeSettlement(
+          fixture.secondRequestReceived,
+          secondSettlement,
+          "request settled before second HTTP entry",
+        ),
+        signal,
       );
       vi.setSystemTime(OWNER_START_MS + REQUEST_TIMEOUT_MS + 100);
       fixture.completeSecondRequest();
-      const completed = await withinFixtureDeadline(
-        secondSettlement,
-        "semantic response completion",
-      );
+      const completed = await withinTest(secondSettlement, signal);
       expect(completed.stopReason).toBe("stop");
       await waitForDiagnosticEventsDrained();
       expect(fixture.requests).toHaveLength(2);
@@ -459,10 +477,10 @@ describe("Responses request deadline recovery at real HTTP", () => {
       secondController.abort(new Error("test cleanup"));
       try {
         if (firstSettlement) {
-          await withinFixtureDeadline(firstSettlement, "semantic first request cleanup");
+          await withinTest(firstSettlement, signal);
         }
         if (secondSettlement) {
-          await withinFixtureDeadline(secondSettlement, "semantic second request cleanup");
+          await withinTest(secondSettlement, signal);
         }
       } finally {
         closeDiagnosticEmbeddedRunOwner(owner);
