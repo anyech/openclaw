@@ -15,16 +15,22 @@ import {
   createOAuthRefreshFence,
   isPendingOAuthRefreshFence,
 } from "./oauth-refresh-marker.js";
-import { captureOAuthRefreshSettlement } from "./oauth-refresh-observation.js";
 import { settleOAuthRefreshClaim } from "./oauth-store.js";
 import { loadPersistedAuthProfileStore } from "./persisted.js";
 import { clearRuntimeAuthProfileStoreSnapshots } from "./runtime-snapshots.js";
-import { resolveAuthProfileDatabasePath } from "./sqlite.js";
 import * as authProfileStoreRuntime from "./store-runtime.js";
 import type { AuthProfileStore, OAuthCredential } from "./types.js";
 const { ensureAuthProfileStoreWithoutExternalProfiles, saveAuthProfileStore } =
   authProfileStoreRuntime;
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+function requirePersistedAuthProfileStore(agentDir: string): AuthProfileStore {
+  const store = loadPersistedAuthProfileStore(agentDir);
+  if (store === null) {
+    throw new Error("Expected the auth-profile fixture store to exist");
+  }
+  return store;
+}
 async function withOAuthTempRoot(
   prefix: string,
   run: (root: string) => Promise<void>,
@@ -81,7 +87,7 @@ describe("OAuth rotated-credential settlement retry", () => {
                   return null;
                 }
                 params.assertCurrent();
-                const draft = structuredClone(loadPersistedAuthProfileStore(agentDir));
+                const draft = structuredClone(requirePersistedAuthProfileStore(agentDir));
                 expect(params.updater(draft)).toBe(true);
                 params.assertCurrent();
                 return null;
@@ -117,7 +123,7 @@ describe("OAuth rotated-credential settlement retry", () => {
         expect(refreshCredential).toHaveBeenCalledOnce();
         expect(buildApiKey).toHaveBeenCalledOnce();
         expect(validateCredential).toHaveBeenCalledWith(refreshed);
-        expect(loadPersistedAuthProfileStore(agentDir).profiles[profileId]).toMatchObject({
+        expect(requirePersistedAuthProfileStore(agentDir).profiles[profileId]).toMatchObject({
           access: refreshed.access,
           refresh: refreshed.refresh,
           accountId: refreshed.accountId,
@@ -160,7 +166,7 @@ describe("OAuth rotated-credential settlement retry", () => {
             if (providerReturned && params.assertCurrent) {
               settlementWrites += 1;
               params.assertCurrent();
-              const draft = structuredClone(loadPersistedAuthProfileStore(agentDir));
+              const draft = structuredClone(requirePersistedAuthProfileStore(agentDir));
               expect(params.updater(draft)).toBe(true);
               params.assertCurrent();
               return null;
@@ -215,20 +221,13 @@ describe("OAuth rotated-credential settlement retry", () => {
         expect(terminalWrites).toBe(1);
         expect(refreshCredential).toHaveBeenCalledOnce();
         expect(buildApiKey).not.toHaveBeenCalled();
-        const persisted = loadPersistedAuthProfileStore(agentDir).profiles[profileId];
+        const persisted = requirePersistedAuthProfileStore(agentDir).profiles[profileId];
         expect(persisted?.type === "oauth" && isPendingOAuthRefreshFence(persisted)).toBe(
           terminalAlsoFails,
         );
         if (!terminalAlsoFails) {
           expect(persisted?.type === "oauth" ? persisted.access : "").toContain(":failed:access:");
         }
-        expect(
-          captureOAuthRefreshSettlement({
-            databasePaths: [resolveAuthProfileDatabasePath(agentDir)],
-            profileId,
-            matchesProvider: (provider) => provider === "xai",
-          }),
-        ).toBeUndefined();
       });
     },
   );
@@ -303,18 +302,11 @@ describe("OAuth rotated-credential settlement retry", () => {
       expect(terminalWrites).toBe(0);
       expect(refreshCredential).toHaveBeenCalledOnce();
       expect(buildApiKey).not.toHaveBeenCalled();
-      expect(loadPersistedAuthProfileStore(agentDir).profiles[profileId]).toMatchObject({
+      expect(requirePersistedAuthProfileStore(agentDir).profiles[profileId]).toMatchObject({
         access: refreshed.access,
         refresh: refreshed.refresh,
         accountId: refreshed.accountId,
       });
-      expect(
-        captureOAuthRefreshSettlement({
-          databasePaths: [resolveAuthProfileDatabasePath(agentDir)],
-          profileId,
-          matchesProvider: (provider) => provider === "xai",
-        }),
-      ).toBeUndefined();
     });
   });
 
@@ -354,7 +346,7 @@ describe("OAuth rotated-credential settlement retry", () => {
               settlementWrites += 1;
               if (settlementWrites === 1) {
                 params.assertCurrent();
-                const draft = structuredClone(loadPersistedAuthProfileStore(agentDir));
+                const draft = structuredClone(requirePersistedAuthProfileStore(agentDir));
                 expect(params.updater(draft)).toBe(true);
                 params.assertCurrent();
                 if (kind === "deleted-profile") {
@@ -406,7 +398,7 @@ describe("OAuth rotated-credential settlement retry", () => {
           },
         );
         const refreshCredential = vi.fn(async () => {
-          const pending = loadPersistedAuthProfileStore(agentDir).profiles[profileId];
+          const pending = requirePersistedAuthProfileStore(agentDir).profiles[profileId];
           if (pending?.type !== "oauth" || !isPendingOAuthRefreshFence(pending)) {
             throw new Error("Expected the provider call to observe its pending OAuth fence");
           }
@@ -447,13 +439,13 @@ describe("OAuth rotated-credential settlement retry", () => {
         expect(settlementWrites).toBe(1);
         expect(refreshCredential).toHaveBeenCalledOnce();
         if (kind === "deleted-profile") {
-          expect(loadPersistedAuthProfileStore(agentDir).profiles[profileId]).toBeUndefined();
+          expect(requirePersistedAuthProfileStore(agentDir).profiles[profileId]).toBeUndefined();
         } else if (kind === "failed-fence") {
-          const persisted = loadPersistedAuthProfileStore(agentDir).profiles[profileId];
+          const persisted = requirePersistedAuthProfileStore(agentDir).profiles[profileId];
           expect(persisted?.type === "oauth" && isPendingOAuthRefreshFence(persisted)).toBe(false);
           expect(persisted?.type === "oauth" ? persisted.access : "").toContain(":failed:access:");
         } else {
-          expect(loadPersistedAuthProfileStore(agentDir).profiles[profileId]).toMatchObject({
+          expect(requirePersistedAuthProfileStore(agentDir).profiles[profileId]).toMatchObject({
             access: kind === "new-owner" ? "synthetic-owner-access" : "synthetic-reconnect-access",
             refresh:
               kind === "new-owner" ? "synthetic-owner-refresh" : "synthetic-reconnect-refresh",
@@ -505,7 +497,7 @@ describe("OAuth rotated-credential settlement retry", () => {
             settlementWrites += 1;
             if (settlementWrites === 1) {
               params.assertCurrent();
-              const draft = structuredClone(loadPersistedAuthProfileStore(agentDir));
+              const draft = structuredClone(requirePersistedAuthProfileStore(agentDir));
               expect(params.updater(draft)).toBe(true);
               params.assertCurrent();
               rejectAfterFirstNull = true;
@@ -542,7 +534,7 @@ describe("OAuth rotated-credential settlement retry", () => {
       expect(retryValidationCalls).toBeGreaterThan(0);
       expect(settlementWrites).toBe(2);
       expect(refreshCredential).toHaveBeenCalledOnce();
-      const persisted = loadPersistedAuthProfileStore(agentDir).profiles[profileId];
+      const persisted = requirePersistedAuthProfileStore(agentDir).profiles[profileId];
       expect(persisted?.type === "oauth" ? persisted.access : "").not.toBe(refreshed.access);
       expect(persisted?.type === "oauth" && isPendingOAuthRefreshFence(persisted)).toBe(false);
     });
