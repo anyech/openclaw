@@ -6,7 +6,7 @@ import {
 import { observeSubagentExecution } from "../../agents/subagents/registry/subagent-execution-observation.js";
 import { subscribeSubagentRunChanges } from "../../agents/subagents/registry/subagent-registry-publication.js";
 import {
-  getLatestSubagentRunByChildSessionKey,
+  getLatestLiveSubagentRunByChildSessionKey,
   isSubagentRunLive,
   isSubagentRunQueued,
   listSubagentRunsForRequester,
@@ -80,7 +80,11 @@ function isCurrentChildGeneration(entry: SubagentRunRecord): boolean {
   if (!childAgentId) {
     return false;
   }
-  const latest = getLatestSubagentRunByChildSessionKey(entry.childSessionKey, childAgentId);
+  const latest = getLatestLiveSubagentRunByChildSessionKey(
+    entry.childSessionKey,
+    undefined,
+    childAgentId,
+  );
   return Boolean(latest && isSameSubagentRunOwner(latest, entry));
 }
 
