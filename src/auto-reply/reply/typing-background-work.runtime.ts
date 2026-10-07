@@ -1,3 +1,7 @@
+import {
+  observeAgentRunHumanWait,
+  type AgentRunHumanWait,
+} from "../../agents/agent-run-approval-wait.js";
 /** Live, request-scoped activity owned by native children and background exec. */
 import {
   listActiveBackgroundProcessSessions,
@@ -15,6 +19,7 @@ import type { SubagentRunRecord } from "../../agents/subagents/registry/subagent
 import { isRequesterYieldCohortMember } from "../../agents/subagents/registry/subagent-requester-settle-identity.js";
 import { isSameSubagentRunOwner } from "../../agents/subagents/registry/subagent-run-generation.js";
 import { onAgentEventForRun } from "../../infra/agent-events.js";
+import { getAgentRunContext } from "../../infra/agent-run-registry.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 
 export type ReplyBackgroundWorkState = "active" | "waiting" | "none";
@@ -26,6 +31,12 @@ export type ReplyBackgroundWorkObserver = {
 };
 
 type RequesterScope = { sessionKey: string; requesterAgentId: string; requesterRunId: string };
+type ChildHumanWaitOwner = {
+  entry: SubagentRunRecord;
+  sessionId?: string;
+  lifecycleGeneration?: string;
+  observer: AgentRunHumanWait;
+};
 
 function isChildLinkedToRequesterRun(entry: SubagentRunRecord, scope: RequesterScope): boolean {
   return (
@@ -118,6 +129,8 @@ export function createReplyBackgroundWorkObserver(params: {
   const terminalRunIds = new Set<string>();
   const yieldedParentRunIds = new Set<string>();
   const childListeners = new Map<string, () => void>();
+  const childRunOwners = new Map<string, SubagentRunRecord>();
+  const childHumanWaitObservers = new Map<string, ChildHumanWaitOwner>();
   const requesterTurnLineage = new Map<string, SubagentRunRecord>();
   const requesterYieldWakeOwners = new Map<
     string,
@@ -209,6 +222,17 @@ export function createReplyBackgroundWorkObserver(params: {
             }
             visited.add(identity);
             currentRunIds.add(child.runId);
+            const previousOwner = childRunOwners.get(child.runId);
+            if (previousOwner && !isSameSubagentRunOwner(previousOwner, child)) {
+              childListeners.get(child.runId)?.();
+              childListeners.delete(child.runId);
+              const previousWait = childHumanWaitObservers.get(child.runId);
+              previousWait?.observer.dispose();
+              childHumanWaitObservers.delete(child.runId);
+              terminalRunIds.delete(child.runId);
+              yieldedParentRunIds.delete(child.runId);
+            }
+            childRunOwners.set(child.runId, child);
             const yieldedParent = isYieldedParent(child);
             if (yieldedParent) {
               nextYieldedParents.add(child.runId);
@@ -220,11 +244,22 @@ export function createReplyBackgroundWorkObserver(params: {
                 child.runId,
                 onAgentEventForRun(child.runId, (event) => {
                   if (
+                    event.runId !== child.runId ||
+                    !isSameSubagentRunOwner(childRunOwners.get(child.runId), child)
+                  ) {
+                    return;
+                  }
+                  if (
                     event.stream === "lifecycle" &&
                     (event.data.phase === "end" || event.data.phase === "error") &&
                     !(event.data.phase === "end" && yieldedParentRunIds.has(child.runId))
                   ) {
                     terminalRunIds.add(child.runId);
+                    const waitOwner = childHumanWaitObservers.get(child.runId);
+                    if (waitOwner && isSameSubagentRunOwner(waitOwner.entry, child)) {
+                      waitOwner.observer.dispose();
+                      childHumanWaitObservers.delete(child.runId);
+                    }
                   }
                   refresh();
                 }),
@@ -242,6 +277,7 @@ export function createReplyBackgroundWorkObserver(params: {
             const queued = isSubagentRunQueued(child);
             const mayFollowDescendants = yieldedParent;
             if (live) {
+              const humanWait = getChildHumanWaitObserver(child);
               const descendants = listSubagentRunsForRequester(child.childSessionKey, {
                 requesterAgentId: childAgentId,
               });
@@ -260,6 +296,12 @@ export function createReplyBackgroundWorkObserver(params: {
               }
               if (observation.state === "waiting" || observation.state === "queued") {
                 // Approval, human input, and other waits are not active work.
+                waiting = true;
+                continue;
+              }
+              if (humanWait?.waiting || humanWait?.resumeRequired) {
+                // Keep only a previously observed exact wait owner suspended until
+                // its execution resumes; an unrelated unknown state is not work.
                 waiting = true;
                 continue;
               }
@@ -296,6 +338,9 @@ export function createReplyBackgroundWorkObserver(params: {
           if (!currentRunIds.has(childRunId)) {
             unsubscribe();
             childListeners.delete(childRunId);
+            childRunOwners.delete(childRunId);
+            childHumanWaitObservers.get(childRunId)?.observer.dispose();
+            childHumanWaitObservers.delete(childRunId);
             terminalRunIds.delete(childRunId);
             yieldedParentRunIds.delete(childRunId);
           }
@@ -334,6 +379,38 @@ export function createReplyBackgroundWorkObserver(params: {
     }
   };
 
+  const getChildHumanWaitObserver = (entry: SubagentRunRecord): AgentRunHumanWait | undefined => {
+    const context = getAgentRunContext(entry.runId);
+    const existing = childHumanWaitObservers.get(entry.runId);
+    if (!context || context.sessionKey !== entry.childSessionKey) {
+      existing?.observer.dispose();
+      childHumanWaitObservers.delete(entry.runId);
+      return undefined;
+    }
+    if (
+      existing &&
+      isSameSubagentRunOwner(existing.entry, entry) &&
+      existing.sessionId === context.sessionId &&
+      existing.lifecycleGeneration === context.lifecycleGeneration
+    ) {
+      return existing.observer;
+    }
+    existing?.observer.dispose();
+    const observer = observeAgentRunHumanWait({
+      runId: entry.runId,
+      sessionKey: entry.childSessionKey,
+      ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+    });
+    observer.onChange = refresh;
+    childHumanWaitObservers.set(entry.runId, {
+      entry,
+      sessionId: context.sessionId,
+      lifecycleGeneration: context.lifecycleGeneration,
+      observer,
+    });
+    return observer;
+  };
+
   const unsubscribeRegistry = subscribeSubagentRunChanges("projection", refresh);
   const unsubscribeProcesses = subscribeProcessSessionChanges(refresh);
   // Subscribe before reading so a registration/terminal publication cannot be lost.
@@ -355,6 +432,11 @@ export function createReplyBackgroundWorkObserver(params: {
         unsubscribe();
       }
       childListeners.clear();
+      for (const { observer } of childHumanWaitObservers.values()) {
+        observer.dispose();
+      }
+      childHumanWaitObservers.clear();
+      childRunOwners.clear();
       terminalRunIds.clear();
       yieldedParentRunIds.clear();
       requesterTurnLineage.clear();

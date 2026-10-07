@@ -7,13 +7,13 @@ import { createTypingKeepaliveLoop } from "./typing-lifecycle.js";
 export type TypingCallbacks = {
   onReplyStart: () => Promise<void>;
   onIdle?: () => void;
-  /** Exact channel/account scope for explicitly opted-in public-audience ownership. */
+  /** Stable channel/account/conversation identity for opted-in public-audience ownership. */
   backgroundWorkAudienceKey?: string;
-  /** Discord-only opt-in: pause request-scoped keepalive without retiring its audience. */
+  /** Pause this request's visible typing while retaining its exact owner through a known wait. */
   onBackgroundWorkPause?: () => void;
-  /** Installs the core owner-retirement callback for an adapter guard trip. */
+  /** Core installs this only for opted-in background work to retire an owner after its failure guard trips. */
   setBackgroundWorkFailureHandler?: (handler: () => void) => void;
-  /** Called when the typing controller is cleaned up (e.g. on NO_REPLY). */
+  /** Stop the transport indicator when the typing controller reaches terminal cleanup. */
   onCleanup?: () => void;
 };
 
@@ -27,7 +27,10 @@ export type CreateTypingCallbacksParams = {
   maxConsecutiveFailures?: number;
   /** Maximum duration for typing indicator before auto-cleanup (safety TTL). Default: 60s */
   maxDurationMs?: number;
-  /** Explicit adapter opt-in to request-attributed background-work typing. */
+  /**
+   * Explicit opt-in to request-attributed background-work typing. Core retains
+   * one keepalive cadence and preserves existing callback recovery when absent.
+   */
   backgroundWorkKeepalive?: true;
 };
 
