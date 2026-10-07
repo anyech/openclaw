@@ -50,6 +50,7 @@ export function createTypingCallbacks(params: CreateTypingCallbacksParams): Typi
   );
   const maxDurationMs = resolveTimerTimeoutMs(params.maxDurationMs, 60_000, 0);
   let closed = false;
+  let pauseGeneration = 0;
   let ttlTimer: ReturnType<typeof setTimeout> | undefined;
   let onBackgroundWorkFailure: () => void = () => {};
 
@@ -124,9 +125,10 @@ export function createTypingCallbacks(params: CreateTypingCallbacksParams): Typi
       tripped = false;
     }
     clearTtlTimer();
+    const startGeneration = pauseGeneration;
     const startPromise = fireStart();
     void startPromise.then(() => {
-      if (closed || tripped) {
+      if (closed || tripped || startGeneration !== pauseGeneration) {
         return;
       }
       // Core can refresh an active reply independently of this channel loop.
@@ -153,6 +155,9 @@ export function createTypingCallbacks(params: CreateTypingCallbacksParams): Typi
     if (closed) {
       return;
     }
+    // An admitted transport start may settle later; it must not rearm a
+    // paused audience's cadence or TTL. A genuine resume uses this generation.
+    pauseGeneration += 1;
     keepaliveLoop.stop();
     clearTtlTimer();
     stopChannelTyping();
