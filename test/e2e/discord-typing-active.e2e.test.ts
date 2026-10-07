@@ -21,6 +21,11 @@ import {
 } from "../../src/config/config.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import type { GatewayServerOptions } from "../../src/gateway/server.js";
+import {
+  registerSessionBindingAdapter,
+  unregisterSessionBindingAdapter,
+  type SessionBindingAdapter,
+} from "../../src/infra/outbound/session-binding-service.js";
 import { registerSealedRuntime } from "../../src/infra/sealed-runtime-registry.js";
 import { flushLogger, resetLogger, setLoggerOverride } from "../../src/logging/logger.js";
 import {
@@ -64,6 +69,13 @@ const fixtureChannelIds = [
 ];
 let nonce: string;
 let fixtureRestBase: string;
+const fixtureBindingAdapter: SessionBindingAdapter = {
+  channel: "discord",
+  accountId: "default",
+  capabilities: { bindSupported: false, unbindSupported: false, placements: [] },
+  listBySession: () => [],
+  resolveByConversation: () => null,
+};
 let restEvents: DiscordRestEvent[] = [];
 let model: Awaited<ReturnType<typeof startTextModel>>;
 let config: OpenClawConfig;
@@ -153,6 +165,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  unregisterSessionBindingAdapter({
+    channel: "discord",
+    accountId: "default",
+    adapter: fixtureBindingAdapter,
+  });
   typingOwnerDiagnostic.dispose();
   unsubscribeEvents?.();
   unsubscribeEvents = undefined;
@@ -366,6 +383,8 @@ beforeAll(async () => {
   await recordPhase("real-plugin-runtime-created");
   const { setDiscordRuntime } = await import("../../extensions/discord/runtime-api.js");
   setDiscordRuntime(realRuntime);
+  // The fixture disables thread bindings; keep real adapter selection/current-owner guards.
+  registerSessionBindingAdapter(fixtureBindingAdapter);
   await recordPhase("discord-runtime-set");
   const channelInbound = await import("openclaw/plugin-sdk/channel-inbound");
   expect(vi.isMockFunction(channelInbound.dispatchChannelInboundTurn)).toBe(false);
@@ -575,7 +594,10 @@ it(
             throw new Error("fixture typing transport failed: " + response.status);
           }
         },
-        intervalMs: 0,
+        keepaliveIntervalMs: 0,
+        onStartError: (error) => {
+          throw error;
+        },
         maxDurationMs: 0,
         backgroundWorkKeepalive: true,
       });
