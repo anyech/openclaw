@@ -1,4 +1,3 @@
-// Stable facade for message-action normalization, routing, and execution.
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
@@ -49,6 +48,7 @@ import { MessageActionDeniedError } from "./message-action-denial.js";
 import {
   assertMessageDeliveryCurrent,
   beforeMessageDeliveryAttempt,
+  withMessageActionEffectAuthority,
   executeMessagePlugin,
   executeMessagePoll,
 } from "./message-action-execution.js";
@@ -169,25 +169,19 @@ async function handleBroadcastAction(
   for (const { channel: targetChannel, plugin: targetChannelPlugin } of targetChannels) {
     for (const target of rawTargets) {
       const receiptDiscriminator = `broadcast:${attemptIndex++}`;
-      if (interrupted) {
-        results.push({
-          channel: targetChannel,
-          to: target,
-          ok: false,
-          attempted: false,
-          error: "Broadcast canceled before this target was attempted.",
-        });
-        continue;
-      }
-      const hadAcceptedResult = hasAcceptedResult();
-      try {
-        throwIfAborted(input.abortSignal);
-        input.assertDirectAdapterHandoff?.();
-      } catch (err) {
-        if (!hadAcceptedResult) {
-          throw err;
+      const hadAcceptedResult = !interrupted && hasAcceptedResult();
+      if (!interrupted) {
+        try {
+          throwIfAborted(input.abortSignal);
+          input.assertDirectAdapterHandoff?.();
+        } catch (err) {
+          if (!hadAcceptedResult) {
+            throw err;
+          }
+          interrupted = true;
         }
-        interrupted = true;
+      }
+      if (interrupted) {
         results.push({
           channel: targetChannel,
           to: target,
@@ -368,7 +362,6 @@ async function handleInternalSourceReplySendAction(
     }),
   });
   const sourceReply = await buildMessagePayload({
-    cfg: input.cfg,
     actionParams: params,
     input,
     agentId,
@@ -486,8 +479,14 @@ async function handleInternalSourceReplySendAction(
     ...(sourceReplyMediaUrls.length ? { mediaUrls: sourceReplyMediaUrls } : {}),
     dryRun,
   };
-  const action = payload.dryRun ? "Prepared" : "Sent";
   const sink = payload.sourceReplySink ? ` via ${payload.sourceReplySink}` : "";
+  // A WebChat user turn shows this transcript to its user. An inter-session result turn may
+  // have no viewer here, so claim no visible delivery.
+  const receipt = input.sourceReplyTranscriptOnly
+    ? payload.dryRun
+      ? "Prepared reply for the current session transcript."
+      : `Recorded reply in the current session transcript${sink}. This send did not deliver it to an external channel.`
+    : `${payload.dryRun ? "Prepared" : "Sent"} visible reply to the current source conversation${sink}.`;
   const cards = readClawHubRecommendations(payload.sourceReply.channelData);
   // The model sees content, not private details. Report verified state even when it supplied prose.
   const recommendationSummary = cards.length
@@ -499,7 +498,7 @@ async function handleInternalSourceReplySendAction(
       : undefined;
   const { sourceReplyDeliveryMode, ...details } = payload;
   const toolResult = textResult(
-    `${action} visible reply to the current source conversation${sink}.${recommendationSummary ? `\n${recommendationSummary}` : ""}`,
+    `${receipt}${recommendationSummary ? `\n${recommendationSummary}` : ""}`,
     {
       ...details,
       ...(sourceReplyDeliveryMode ? { sourceReplyDeliveryMode } : {}),
@@ -521,6 +520,12 @@ async function handleInternalSourceReplySendAction(
 }
 
 export async function runMessageAction(input: MessageActionInput): Promise<MessageActionResult> {
+  return withMessageActionEffectAuthority(input, () => runMessageActionWithAuthority(input));
+}
+
+async function runMessageActionWithAuthority(
+  input: MessageActionInput,
+): Promise<MessageActionResult> {
   throwIfAborted(input.abortSignal);
   const cfg = input.cfg;
   let params = { ...input.params };
@@ -672,7 +677,6 @@ export async function runMessageAction(input: MessageActionInput): Promise<Messa
             channel,
             channelPlugin,
             mediaAccess,
-            extraActionMediaSourceParamKeys,
             accountId,
             dryRun,
             gateway,

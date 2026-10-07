@@ -3,7 +3,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createDeferred, withinTest } from "../../../test/helpers/promise.js";
+import {
+  awaitGateBeforeSettlement,
+  createDeferred,
+  withinTest,
+} from "../../../test/helpers/promise.js";
 import {
   createOperationalRunInstanceRef,
   prepareAgentRunAdmission,
@@ -43,6 +47,7 @@ import {
   createOpenClawTestState,
   type OpenClawTestState,
 } from "../../test-utils/openclaw-test-state.js";
+import * as steeringAuthority from "./agent-runner-fallback-authority.js";
 import { dispatchReplyFromConfig } from "./dispatch-from-config.js";
 import { withFullRuntimeReplyConfig } from "./get-reply-fast-path.js";
 import { getReplyFromConfig } from "./get-reply.js";
@@ -579,9 +584,18 @@ it.each([
   );
 });
 
-it("adopts a visible ordinary inbound turn into its admitted direct attempt", async () => {
+it.for([
+  {
+    name: "adopts a visible ordinary inbound turn into its admitted direct attempt",
+    replace: false,
+  },
+  {
+    name: "does not retarget a replacement direct registration during authority preparation",
+    replace: true,
+  },
+])("$name", async ({ replace }, { signal }) => {
   const sessionKey = baseRoute.sessionKey;
-  const seeded = await seedSessionEntry("direct-visible-seed");
+  const seeded = await seedSessionEntry(replace ? "direct-aba-seed" : "direct-visible-seed");
   const sessionFile = expectDefined(
     vi.mocked(runEmbeddedAgent).mock.calls.at(-1)?.[0].sessionFile,
     "real channel session file",
@@ -590,9 +604,19 @@ it("adopts a visible ordinary inbound turn into its admitted direct attempt", as
   expect(bashElevated).toBeDefined();
   vi.mocked(runEmbeddedAgent).mockClear();
   observed.events.length = 0;
-  const ctx = makeContext(baseRoute, false, undefined, "direct-visible-inbound");
+  const ctx = makeContext(
+    baseRoute,
+    false,
+    undefined,
+    replace ? "direct-aba-inbound" : "direct-visible-inbound",
+  );
   const adopted: string[] = [];
   const deferred: string[] = [];
+  const adoptedFollowupSettled = createDeferred();
+  const replacementReady = createDeferred<DirectInjectionRecord[]>();
+  const releaseReplacement = createDeferred();
+  let replacementLease: Promise<void> | undefined;
+  let replacementInjections: DirectInjectionRecord[] | undefined;
   try {
     await withActiveDirectAttempt(
       { sessionId: seeded.sessionId, sessionFile, bashElevated },
@@ -600,41 +624,243 @@ it("adopts a visible ordinary inbound turn into its admitted direct attempt", as
         expect(owner.sessionId).not.toBe(owner.sessionKey);
         expect(owner.target).toMatchObject({ runId: owner.runId, sourceTurnId: owner.runId });
         expect(replyRunRegistry.get(sessionKey)).toBeUndefined();
-        await withoutGatewayToolCallerIdentity(() =>
-          invoke("inbound", ctx, {
-            turnAdoptionLifecycle: {
-              onAdopted: () => {
-                adopted.push(owner.runId);
-              },
-              onDeferred: () => {
-                deferred.push(owner.runId);
-                return true;
-              },
-            },
-          }),
-        );
-        expect(replyRunRegistry.get(sessionKey)).toBeUndefined();
-        expect(getFollowupQueueDepth(sessionKey)).toBe(0);
-        expect(owner.injections).toHaveLength(1);
-        const injection = expectDefined(owner.injections[0], "accepted direct input");
-        expect(injection).toMatchObject({
-          text: expect.stringContaining("hello"),
-          authorityKind: "run",
-          isInboundUserMessage: true,
-          waitForTranscriptCommit: true,
+        const originalResolve = steeringAuthority.resolveReplySteeringAuthority;
+        const resolver = replace
+          ? vi
+              .spyOn(steeringAuthority, "resolveReplySteeringAuthority")
+              .mockImplementation(async (...args) => {
+                const selected = await originalResolve(...args);
+                if (!replacementLease) {
+                  replacementLease = withActiveDirectAttempt(
+                    { sessionId: seeded.sessionId, sessionFile, bashElevated },
+                    async (replacement) => {
+                      expect(replacement.runId).toBe(owner.runId);
+                      replacementReady.resolve(replacement.injections);
+                      await releaseReplacement.promise;
+                    },
+                  );
+                  replacementInjections = await withinTest(
+                    awaitGateBeforeSettlement(
+                      replacementReady.promise,
+                      replacementLease,
+                      "replacement scope settled before registration",
+                    ),
+                    signal,
+                  );
+                }
+                return selected;
+              })
+          : undefined;
+        try {
+          await withinTest(
+            withoutGatewayToolCallerIdentity(() =>
+              invoke("inbound", ctx, {
+                turnAdoptionLifecycle: {
+                  onAdopted: () => {
+                    adopted.push(owner.runId);
+                  },
+                  onDeferred: () => {
+                    deferred.push(owner.runId);
+                    return true;
+                  },
+                  onSettled: () => {
+                    if (adopted.length > 0) {
+                      adoptedFollowupSettled.resolve();
+                    }
+                  },
+                },
+              }),
+            ),
+            signal,
+          );
+          expect(replyRunRegistry.get(sessionKey)).toBeUndefined();
+          expect(runEmbeddedAgent).not.toHaveBeenCalled();
+          if (replace) {
+            expect(resolver).toHaveBeenCalledOnce();
+            expect(getFollowupQueueDepth(sessionKey)).toBe(1);
+            expect(owner.injections).toEqual([]);
+            expect(
+              expectDefined(replacementInjections, "replacement backend observations"),
+            ).toEqual([]);
+            expect(owner.transcriptConfirmations).toEqual([]);
+            expect(adopted).toEqual([]);
+          } else {
+            expect(getFollowupQueueDepth(sessionKey)).toBe(0);
+            expect(owner.injections).toHaveLength(1);
+            const injection = expectDefined(owner.injections[0], "accepted direct input");
+            expect(injection).toMatchObject({
+              text: expect.stringContaining("hello"),
+              authorityKind: "run",
+              isInboundUserMessage: true,
+              waitForTranscriptCommit: true,
+            });
+            expect(injection.queueIdentity).toBeTruthy();
+            expect(owner.transcriptConfirmations).toEqual([owner.runId]);
+          }
+        } finally {
+          resolver?.mockRestore();
+          releaseReplacement.resolve();
+          await replacementLease;
+        }
+      },
+    );
+    if (replace) {
+      await withinTest(adoptedFollowupSettled.promise, signal);
+      expect(getFollowupQueueDepth(sessionKey)).toBe(0);
+      expect(adopted).toEqual(["direct-attempt-" + seeded.sessionId]);
+    } else {
+      expect(adopted).toEqual(["direct-attempt-" + seeded.sessionId]);
+      expect(runEmbeddedAgent).not.toHaveBeenCalled();
+    }
+    expect(deferred).toEqual(["direct-attempt-" + seeded.sessionId]);
+  } finally {
+    releaseReplacement.resolve();
+    await replacementLease;
+    clearFollowupQueue(sessionKey);
+  }
+});
+
+it("does not retarget a null caller capture", async ({ signal }) => {
+  const sessionKey = baseRoute.sessionKey;
+  const seeded = await seedSessionEntry("seed-null-direct-target");
+  const sessionFile = expectDefined(
+    vi.mocked(runEmbeddedAgent).mock.calls.at(-1)?.[0].sessionFile,
+    "real channel session file",
+  );
+  const bashElevated = vi.mocked(runEmbeddedAgent).mock.calls.at(-1)?.[0].bashElevated;
+  expect(bashElevated).toBeDefined();
+  vi.mocked(runEmbeddedAgent).mockClear();
+  const runId = "direct-null-" + seeded.sessionId;
+  const unadmittedHandle = createEmbeddedRunHandle({ runId: "unadmitted-" + seeded.sessionId });
+  const admission = prepareAgentRunAdmission({
+    cfg,
+    operationalRunInstance: createOperationalRunInstanceRef(runId),
+    facts: {
+      agentId: "main",
+      runId,
+      ingress: { kind: "system", state: "present", boundary: "reply-owner-null-capture-test" },
+    },
+  });
+  const captured =
+    createDeferred<ReturnType<typeof replyRunRegistry.resolveCurrentMessageInjectionTarget>>();
+  const originalResolve =
+    replyRunRegistry.resolveCurrentMessageInjectionTarget.bind(replyRunRegistry);
+  let activeHandle: ReturnType<typeof createEmbeddedRunHandle> | undefined = unadmittedHandle;
+  let firstCapture = true;
+  try {
+    const admittedRunContext = await admission.admit("embedded", "reply-owner-null-capture-test");
+    setActiveEmbeddedRun(seeded.sessionId, unadmittedHandle, sessionKey, sessionFile, "main");
+    const attempt = {
+      sessionId: seeded.sessionId,
+      sessionKey,
+      sessionFile,
+      runId,
+      agentId: "main",
+      config: cfg,
+      agentDir: state.agentDir(),
+      workspaceDir: state.path("main-workspace"),
+      provider: "mock-openai",
+      modelId: "gpt-5.6-luna",
+      sandboxSessionKey: sessionKey,
+      messageChannel: "webchat",
+      senderIsOwner: false,
+      senderId: "synthetic-user",
+      messageProvider: "webchat",
+      chatType: "direct" as const,
+      agentAccountId: "default",
+      traceAuthorized: false,
+      bashElevated,
+    };
+    await withPreparedEmbeddedRunToolAuthority(
+      { admittedRunContext },
+      attempt,
+      undefined,
+      async (prepared) => {
+        const injections: DirectInjectionRecord[] = [];
+        const transcriptConfirmations: string[] = [];
+        const handle = createEmbeddedRunHandle({
+          runId,
+          toolAuthorityFingerprint: prepared.toolAuthorityFingerprint,
+          isStreaming: true,
+          supportsTranscriptCommitWait: true,
         });
-        expect(injection.queueIdentity).toBeTruthy();
-        expect(owner.transcriptConfirmations).toEqual([owner.runId]);
-        expect(runEmbeddedAgent).not.toHaveBeenCalled();
+        handle.sourceReplyDeliveryMode = "automatic";
+        handle.terminalReplyExpectation = "required";
+        handle.messageInjectionV2 = {
+          version: 2,
+          isAvailable: () => true,
+          queueMessage: async (text, queueOptions, assertCurrent, authorityKind) => {
+            assertCurrent();
+            const recorder = queueOptions?.userTurnTranscriptRecorder;
+            const confirm = recorder?.confirmSteerTargetRunIdForPersistence;
+            if (recorder && confirm) {
+              recorder.confirmSteerTargetRunIdForPersistence = async (targetRunId) => {
+                transcriptConfirmations.push(targetRunId);
+                await confirm(targetRunId);
+              };
+            }
+            injections.push({
+              text,
+              authorityKind,
+              isInboundUserMessage: queueOptions?.isInboundUserMessage === true,
+              waitForTranscriptCommit: queueOptions?.waitForTranscriptCommit === true,
+              sourceReplyDeliveryMode: queueOptions?.sourceReplyDeliveryMode,
+              queueIdentity: queueOptions?.queueIdentity,
+            });
+            queueOptions?.onQueueAccepted?.(true);
+          },
+        };
+        const resolver = vi
+          .spyOn(replyRunRegistry, "resolveCurrentMessageInjectionTarget")
+          .mockImplementation((key) => {
+            const target = originalResolve(key);
+            if (firstCapture) {
+              firstCapture = false;
+              expect(target).toBeUndefined();
+              clearActiveEmbeddedRun(seeded.sessionId, unadmittedHandle, sessionKey);
+              setActiveEmbeddedRun(seeded.sessionId, handle, sessionKey, sessionFile, "main");
+              activeHandle = handle;
+              captured.resolve(target);
+            }
+            return target;
+          });
+        const pending = invoke(
+          "inbound",
+          makeContext(baseRoute, false, undefined, "null-direct-target-inbound"),
+          {
+            turnAdoptionLifecycle: {
+              onAdopted: vi.fn(),
+              onDeferred: () => true,
+            },
+          },
+        );
+        try {
+          await withinTest(
+            awaitGateBeforeSettlement(captured.promise, pending, "caller did not capture absence"),
+            signal,
+          );
+          expect(originalResolve(sessionKey)).toMatchObject({ runId, sourceTurnId: runId });
+          await withinTest(pending, signal);
+          expect(injections).toEqual([]);
+          expect(transcriptConfirmations).toEqual([]);
+          expect(getFollowupQueueDepth(sessionKey)).toBe(1);
+        } finally {
+          resolver.mockRestore();
+          if (activeHandle) {
+            clearActiveEmbeddedRun(seeded.sessionId, activeHandle, sessionKey);
+            activeHandle = undefined;
+          }
+          clearFollowupQueue(sessionKey);
+        }
       },
     );
   } finally {
+    if (activeHandle) {
+      clearActiveEmbeddedRun(seeded.sessionId, activeHandle, sessionKey);
+    }
+    admission.close();
     clearFollowupQueue(sessionKey);
   }
-  expect(adopted).toEqual(["direct-attempt-" + seeded.sessionId]);
-  // Accepted steering first parks custody, then adopts it without a followup run.
-  expect(deferred).toEqual(["direct-attempt-" + seeded.sessionId]);
-  expect(runEmbeddedAgent).not.toHaveBeenCalled();
 });
 
 it.for([

@@ -11,6 +11,8 @@ import { hasOperatorAdminAccess } from "../../../app/operator-access.ts";
 import type { MarkdownFileLinkTarget } from "../../../components/markdown-file-links.ts";
 import { t } from "../../../i18n/index.ts";
 import { registerFilePreviewEnglish } from "../../../i18n/locales/en-file-preview.ts";
+import { readBlobAsDataUrl } from "../../../lib/blob-data-url.ts";
+import { base64ToBytes } from "../../../lib/bytes-base64.ts";
 import { formatUiError } from "../../../lib/format-error.ts";
 import { isGatewayMethodAdvertised } from "../../../lib/gateway-methods.ts";
 import { pathDisplayName } from "../../../lib/path-display.ts";
@@ -23,7 +25,6 @@ import {
   getSessionWorkspace,
   isCurrentSessionWorkspace,
   loadSessionWorkspace,
-  openSessionCheckoutSidebar,
   refreshSessionWorkspaceState,
   trackSessionCheckoutSidebar,
 } from "./chat-session-workspace-state.ts";
@@ -32,14 +33,12 @@ import type {
   SessionWorkspaceProps,
   SessionWorkspaceState,
 } from "./chat-session-workspace-types.ts";
-import { hasUniformLineEndings, type SidebarContent } from "./chat-sidebar.ts";
+import type { SidebarContent } from "./chat-sidebar-content-types.ts";
+import { hasUniformLineEndings } from "./chat-sidebar-file-view.ts";
 
 registerFilePreviewEnglish();
 
-export {
-  clearSessionWorkspaceTimers,
-  retireSessionWorkspaceCheckout,
-} from "./chat-session-workspace-state.ts";
+export { retireSessionWorkspaceCheckout } from "./chat-session-workspace-state.ts";
 export { renderSessionWorkspaceRail } from "./chat-session-workspace-rail.ts";
 export type {
   SessionWorkspaceHost,
@@ -117,25 +116,9 @@ async function loadArtifactSidebarContent(
   if (blob) {
     if (mimeType.startsWith("image/")) {
       // Workspace previews outlive the ticket, so retain the image in the existing data URL form.
-      imageSource = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.addEventListener(
-          "load",
-          () => {
-            if (typeof reader.result === "string") {
-              resolve(reader.result);
-            } else {
-              reject(new Error("Artifact image could not be decoded"));
-            }
-          },
-          { once: true },
-        );
-        reader.addEventListener(
-          "error",
-          () => reject(reader.error ?? new Error("Artifact image could not be decoded")),
-          { once: true },
-        );
-        reader.readAsDataURL(blob);
+      imageSource = await readBlobAsDataUrl(blob, {
+        readError: "Artifact image could not be decoded",
+        invalidResultError: "Artifact image could not be decoded",
       });
     } else {
       text = await blob.text();
@@ -144,9 +127,7 @@ async function loadArtifactSidebarContent(
     if (mimeType.startsWith("image/")) {
       imageSource = `data:${mimeType};base64,${data}`;
     } else if (mimeType === "application/json" || mimeType.startsWith("text/")) {
-      text = new TextDecoder().decode(
-        Uint8Array.from(globalThis.atob(data), (char) => char.charCodeAt(0)),
-      );
+      text = new TextDecoder().decode(base64ToBytes(data));
     }
   }
   if (imageSource) {
@@ -267,7 +248,6 @@ function openFile(
                   },
                 );
                 const hash = saved?.file.hash;
-                const updatedAtMs = saved?.file.updatedAtMs;
                 if (
                   typeof hash === "string" &&
                   viewingSession &&
@@ -279,7 +259,6 @@ function openFile(
                   ? {
                       ok: true as const,
                       hash,
-                      ...(typeof updatedAtMs === "number" ? { updatedAtMs } : {}),
                     }
                   : { ok: false as const, code: "error" as const, message: "Save failed." };
               } catch (error) {
@@ -287,15 +266,12 @@ function openFile(
                   error instanceof GatewayRequestError &&
                   error.details &&
                   typeof error.details === "object"
-                    ? (error.details as { type?: unknown; currentHash?: unknown })
+                    ? (error.details as { type?: unknown })
                     : null;
                 if (details?.type === "session_file_conflict") {
                   return {
                     ok: false as const,
                     code: "conflict" as const,
-                    ...(typeof details.currentHash === "string"
-                      ? { currentHash: details.currentHash }
-                      : {}),
                   };
                 }
                 return {
@@ -448,7 +424,7 @@ function openArtifact(
     if (result?.encoding !== "base64" || result.data === undefined) {
       return null;
     }
-    return new Blob([Uint8Array.from(atob(result.data), (char) => char.charCodeAt(0))], {
+    return new Blob([base64ToBytes(result.data)], {
       type: result.artifact.mimeType ?? "application/octet-stream",
     });
   };
@@ -521,7 +497,6 @@ export function createSessionWorkspaceProps(
       workspace.filter = filter;
       state.requestUpdate?.();
     },
-    onRefresh: () => loadSessionWorkspace(state, workspace, true),
     onBrowsePath: (path) => {
       clearWorkspaceTimer(workspace);
       workspace.browserPath = path;
@@ -547,7 +522,7 @@ export function createSessionWorkspaceProps(
       }, 160);
     },
     onOpenArtifact: (artifactId) => openArtifact(state, workspace, artifactId),
-    onOpenDiff: diffContent ? () => openSessionCheckoutSidebar(state, diffContent) : undefined,
+    onOpenDiff: diffContent ? () => state.handleOpenSidebar(diffContent) : undefined,
   };
 }
 
