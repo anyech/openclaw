@@ -53,9 +53,13 @@ afterEach(async () => {
   workObserver = undefined;
   humanWait?.dispose();
   humanWait = undefined;
-  if (childClaimId) releaseAgentRunContext(childRunId, childClaimId);
+  if (childClaimId) {
+    releaseAgentRunContext(childRunId, childClaimId);
+  }
   childClaimId = undefined;
-  if (successorClaimId) releaseAgentRunContext("typing-human-wait-successor", successorClaimId);
+  if (successorClaimId) {
+    releaseAgentRunContext("typing-human-wait-successor", successorClaimId);
+  }
   successorClaimId = undefined;
   resetPendingAskUserQuestionsForTest();
   await resetSubagentRegistryForTests({ persist: false });
@@ -96,9 +100,9 @@ it("keeps the exact answered ask_user child suspended until execution resumes", 
   expect(observeSubagentExecution(subagentRuns.get(childRunId)!, []).state).toBe("running");
 
   const observerReady = createDeferred<ReturnType<typeof createReplyBackgroundWorkObserver>>();
-  const workWaiting = createDeferred<void>();
-  const workResumed = createDeferred<void>();
-  const workFinished = createDeferred<void>();
+  const workWaiting = createDeferred();
+  const workResumed = createDeferred();
+  const workFinished = createDeferred();
   let sawChildWait = false;
   const starts = vi.fn();
   const pauses = vi.fn();
@@ -116,8 +120,12 @@ it("keeps the exact answered ask_user child suspended until execution resumes", 
             sawChildWait = true;
             workWaiting.resolve();
           }
-          if (state === "active" && sawChildWait) workResumed.resolve();
-          if (state === "none") workFinished.resolve();
+          if (state === "active" && sawChildWait) {
+            workResumed.resolve();
+          }
+          if (state === "none") {
+            workFinished.resolve();
+          }
         },
       });
       workObserver = observer;
@@ -125,6 +133,10 @@ it("keeps the exact answered ask_user child suspended until execution resumes", 
       return observer;
     },
   });
+  const shouldRetainCallbacks = controller.shouldRetainChannelCallbacks;
+  if (!shouldRetainCallbacks) {
+    throw new Error("expected the opt-in controller custody hook");
+  }
   controller.setBackgroundWorkPause?.(pauses, "discord/test-account/typing-human-wait");
   controller.bindRunIdentity?.(
     requesterRunId,
@@ -137,16 +149,20 @@ it("keeps the exact answered ask_user child suspended until execution resumes", 
   controller.markRunComplete();
   controller.markDispatchIdle();
 
-  const answerStarted = createDeferred<void>();
-  const promptDelivered = createDeferred<void>();
-  const waitStarted = createDeferred<void>();
-  const resumeRequired = createDeferred<void>();
+  const answerStarted = createDeferred();
+  const promptDelivered = createDeferred();
+  const waitStarted = createDeferred();
+  const resumeRequired = createDeferred();
   let questionId: unknown;
   let finishAnswer: ((value: unknown) => void) | undefined;
   humanWait = observeAgentRunHumanWait({ runId: childRunId, sessionKey: childSessionKey });
   humanWait.onChange = (snapshot) => {
-    if (snapshot.waiting) waitStarted.resolve();
-    if (snapshot.resumeRequired) resumeRequired.resolve();
+    if (snapshot.waiting) {
+      waitStarted.resolve();
+    }
+    if (snapshot.resumeRequired) {
+      resumeRequired.resolve();
+    }
   };
   const gatewayCall = (async (
     method: string,
@@ -163,7 +179,9 @@ it("keeps the exact answered ask_user child suspended until execution resumes", 
         finishAnswer = resolve;
       });
     }
-    if (method === "question.resolve") return { status: "cancelled" };
+    if (method === "question.resolve") {
+      return { status: "cancelled" };
+    }
     throw new Error("unexpected Gateway question method");
   }) as GatewayCall;
   const pending = createAskUserTool({
@@ -193,7 +211,7 @@ it("keeps the exact answered ask_user child suspended until execution resumes", 
   expect(humanWait.waiting).toBe(true);
   expect(workObserver.currentState()).toBe("waiting");
   expect(pauses).toHaveBeenCalledTimes(1);
-  expect(controller.shouldRetainChannelCallbacks()).toBe(true);
+  expect(shouldRetainCallbacks()).toBe(true);
   const startsWhileWaiting = starts.mock.calls.length;
 
   finishAnswer?.({ status: "answered", answers: { answers: { choice: ["A"] } } });
@@ -204,7 +222,7 @@ it("keeps the exact answered ask_user child suspended until execution resumes", 
   expect(humanWait.resumeRequired).toBe(true);
   expect(observeSubagentExecution(subagentRuns.get(childRunId)!, []).state).toBe("unknown");
   expect(workObserver.currentState()).toBe("waiting");
-  expect(controller.shouldRetainChannelCallbacks()).toBe(true);
+  expect(shouldRetainCallbacks()).toBe(true);
 
   expect(typeof questionId).toBe("string");
   emitAgentEvent({
@@ -228,7 +246,7 @@ it("keeps the exact answered ask_user child suspended until execution resumes", 
     data: { phase: "end" },
   });
   await withinTest(workFinished.promise, signal);
-  expect(controller.shouldRetainChannelCallbacks()).toBe(false);
+  expect(shouldRetainCallbacks()).toBe(false);
   expect(controller.isActive()).toBe(false);
   expect(cleanups).toHaveBeenCalledTimes(1);
 
@@ -267,11 +285,13 @@ it("keeps the exact answered ask_user child suspended until execution resumes", 
   });
   try {
     expect(freshObserver.currentState()).toBe("none");
-    expect(controller.shouldRetainChannelCallbacks()).toBe(false);
+    expect(shouldRetainCallbacks()).toBe(false);
     expect(starts.mock.calls.length).toBe(startsAfterResume);
   } finally {
     freshObserver.dispose();
-    if (successorClaimId) releaseAgentRunContext(successorRunId, successorClaimId);
+    if (successorClaimId) {
+      releaseAgentRunContext(successorRunId, successorClaimId);
+    }
     successorClaimId = undefined;
   }
 });
