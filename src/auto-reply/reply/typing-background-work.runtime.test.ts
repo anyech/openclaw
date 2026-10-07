@@ -3,7 +3,7 @@ import type { SubagentRunRecord } from "../../agents/subagents/registry/subagent
 import { createReplyBackgroundWorkObserver } from "./typing-background-work.runtime.js";
 
 const owners = vi.hoisted(() => ({
-  rows: [] as Array<Record<string, unknown>>,
+  rows: [] as SubagentRunRecord[],
   liveRunIds: new Set<string>(),
   queuedRunIds: new Set<string>(),
   observations: new Map<string, { state: string; wait?: { kind: string } }>(),
@@ -20,12 +20,17 @@ vi.mock("../../agents/subagents/registry/subagent-registry-read.js", () => ({
         entry.requesterSessionKey === sessionKey &&
         (!options?.requesterAgentId || entry.requesterAgentId === options.requesterAgentId),
     ),
-  getLatestSubagentRunByChildSessionKey: (childSessionKey: string, childAgentId?: string) =>
+  getLatestLiveSubagentRunByChildSessionKey: (
+    childSessionKey: string,
+    matches?: (entry: SubagentRunRecord) => boolean,
+    childAgentId?: string,
+  ) =>
     owners.rows
       .filter(
         (entry) =>
           entry.childSessionKey === childSessionKey &&
-          (!childAgentId || entry.childAgentId === childAgentId),
+          (!childAgentId || entry.childAgentId === childAgentId) &&
+          (!matches || matches(entry)),
       )
       .toSorted((left, right) => Number(right.generation ?? 0) - Number(left.generation ?? 0))[0] ??
     null,
@@ -238,7 +243,7 @@ describe("reply background work attribution", () => {
         rearmGeneration: 1,
       },
     } as unknown as SubagentRunRecord;
-    owners.rows[0] = transferred as unknown as Record<string, unknown>;
+    owners.rows[0] = transferred;
     notifyRegistry();
 
     expect(observer.currentState()).toBe("active");
@@ -251,7 +256,7 @@ describe("reply background work attribution", () => {
         rearmGeneration: 2,
       },
     } as unknown as SubagentRunRecord;
-    owners.rows[0] = rearmed as unknown as Record<string, unknown>;
+    owners.rows[0] = rearmed;
     notifyRegistry();
 
     expect(observer.currentState()).toBe("none");

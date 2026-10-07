@@ -1,6 +1,7 @@
 import path from "node:path";
 import { DEFAULT_EMOJIS, DEFAULT_TIMING } from "openclaw/plugin-sdk/channel-feedback";
 import { resolveGroupThreadMentionFacts } from "openclaw/plugin-sdk/channel-inbound";
+import * as channelOutbound from "openclaw/plugin-sdk/channel-outbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { setReplyPayloadMetadata } from "openclaw/plugin-sdk/reply-payload-testing";
@@ -99,6 +100,30 @@ describe("processDiscordMessage ack reactions", () => {
     }
     expect(typingMocks.sendTyping).not.toHaveBeenCalled();
     expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards admitted background audience and transport-failure ownership", async () => {
+    const pipelineSpy = vi.spyOn(channelOutbound, "createChannelMessageReplyPipeline");
+    const ctx = await createAutomaticSourceDeliveryContext();
+    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+      const pipelineResult = pipelineSpy.mock.results.at(-1);
+      if (pipelineResult?.type !== "return") {
+        throw new Error("expected the admitted channel reply pipeline");
+      }
+      const callbacks = pipelineResult.value.typingCallbacks;
+      expect(callbacks?.backgroundWorkAudienceKey).toBe(
+        JSON.stringify(["discord", ctx.accountId, "c1"]),
+      );
+      const retireOwner = vi.fn();
+      callbacks?.setBackgroundWorkFailureHandler?.(retireOwner);
+      typingMocks.sendTyping.mockRejectedValue(new Error("typing transport unavailable"));
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await params?.replyOptions?.onReplyStart?.();
+      }
+      expect(retireOwner).toHaveBeenCalledTimes(1);
+      return createNoQueuedDispatchResult();
+    });
+    await runProcessDiscordMessage(ctx);
   });
 
   it("starts typing on admission and forwards repeated resolver refreshes", async () => {
@@ -900,11 +925,12 @@ describe("processDiscordMessage session routing", () => {
 
     await runProcessDiscordMessage(ctx);
 
-    expectRecordFields(requireRecord(getLastDispatchReplyOptions(), "dispatch reply options"), {
+    const replyOptions = requireRecord(getLastDispatchReplyOptions(), "dispatch reply options");
+    expectRecordFields(replyOptions, {
       sourceReplyDeliveryMode: "message_tool_only",
-      typingKeepalive: false,
       disableBlockStreaming: true,
     });
+    expect(replyOptions.typingKeepalive ?? true).toBe(true);
     expect(createDiscordDraftStream).not.toHaveBeenCalled();
   });
 });

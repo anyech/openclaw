@@ -726,7 +726,8 @@ export function createReplyDispatcherWithTyping(
     ...dispatcherOptions
   } = options;
   const resolvedOnReplyStart = onReplyStart ?? typingCallbacks?.onReplyStart;
-  const resolvedOnIdle = onIdle ?? typingCallbacks?.onIdle;
+  const resolvedOnIdle: ReplyDispatcherWithTypingOptions["onIdle"] =
+    onIdle ?? typingCallbacks?.onIdle;
   const resolvedOnCleanup = onCleanup ?? typingCallbacks?.onCleanup;
   let typingController: TypingController | undefined;
   const stopChannelCallbacks = () =>

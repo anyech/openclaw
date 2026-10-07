@@ -132,7 +132,6 @@ export function createTypingController(params: {
   // Leave one full cadence for a keepalive call to settle before safety cleanup.
   const typingTtlMs = Math.max(DEFAULT_TYPING_TTL_MS, typingIntervalMs * 2);
 
-
   const formatTypingTtl = (ms: number) => {
     if (ms % 60_000 === 0) {
       return `${ms / 60_000}m`;

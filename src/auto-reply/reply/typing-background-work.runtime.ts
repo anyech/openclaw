@@ -316,7 +316,7 @@ export function createReplyBackgroundWorkObserver(params: {
             typeof processSession.pid === "number" &&
             processSession.pid > 0 &&
             processSession.processActivity !== undefined &&
-            processSession.processActivity.resultSettled === false,
+            !processSession.processActivity.resultSettled,
         );
         if (active || hasAttributedProcess) {
           publish("active");

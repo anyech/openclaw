@@ -127,6 +127,11 @@ export function createDiscordMessageReplyRuntime(params: {
     // The core lifecycle reaches this callback only after reply admission.
     // Silent pre-dispatch outcomes therefore never allocate or emit feedback.
     typingCallbacks: {
+      get backgroundWorkAudienceKey() {
+        return getTypingFeedback().backgroundWorkAudienceKey;
+      },
+      setBackgroundWorkFailureHandler: (handler) =>
+        getTypingFeedback().setBackgroundWorkFailureHandler?.(handler),
       onReplyStart: () => getTypingFeedback().onReplyStart(),
       onIdle: () => typingFeedback?.onIdle?.(),
       onBackgroundWorkPause: () => typingFeedback?.onBackgroundWorkPause?.(),

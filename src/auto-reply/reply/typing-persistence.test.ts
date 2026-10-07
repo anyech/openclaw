@@ -397,7 +397,7 @@ describe("typing persistence bug fix", () => {
     expect(failedOwner.shouldRetainChannelCallbacks?.()).toBe(false);
     expect(vi.getTimerCount()).toBe(0);
 
-    const pendingStart = createDeferred<void>();
+    const pendingStart = createDeferred();
     const lateCallbacks = createTypingCallbacks({
       start: () => pendingStart.promise,
       onStartError: vi.fn(),

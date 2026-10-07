@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createDeferred, withTestTimeout } from "../../../test/helpers/promise.js";
+import {
+  awaitGateBeforeSettlement,
+  createDeferred,
+  withinTest,
+} from "../../../test/helpers/promise.js";
 import { observeAgentRunHumanWait } from "../agent-run-approval-wait.js";
 import { createAskUserTool } from "./ask-user-tool.js";
 
@@ -24,7 +28,9 @@ describe("ask_user human wait liveness events", () => {
     vi.useRealTimers();
   });
 
-  it("publishes only after prompt answerability and requires execution to resume", async () => {
+  it("publishes only after prompt answerability and requires execution to resume", async ({
+    signal,
+  }) => {
     const runId = "run-ask-user-human-wait";
     const sessionKey = "agent:main:discord:channel:ask-user-human-wait";
     const answerStarted = createDeferred<void>();
@@ -63,9 +69,22 @@ describe("ask_user human wait liveness events", () => {
       questionPrompt: { send: () => promptDelivered.resolve() },
     }).execute("call-ask-user-wait", args);
     try {
-      await withTestTimeout(answerStarted.promise, 1_000, "answer RPC did not start");
-      await withTestTimeout(promptDelivered.promise, 1_000, "prompt did not deliver");
-      await withTestTimeout(waitStarted.promise, 1_000, "answerable wait event was not emitted");
+      await withinTest(
+        awaitGateBeforeSettlement(answerStarted.promise, pending, "answer RPC did not start"),
+        signal,
+      );
+      await withinTest(
+        awaitGateBeforeSettlement(promptDelivered.promise, pending, "prompt did not deliver"),
+        signal,
+      );
+      await withinTest(
+        awaitGateBeforeSettlement(
+          waitStarted.promise,
+          pending,
+          "answerable wait event was not emitted",
+        ),
+        signal,
+      );
       expect(wait.waiting).toBe(true);
       expect(wait.resumeRequired).toBe(false);
 
