@@ -82,7 +82,6 @@ export function createDiscordMessageReplyRuntime(params: {
   ctx: DiscordMessagePreflightContext;
   processContext: DiscordMessageProcessContext;
   sourceRepliesAreToolOnly: boolean;
-  shouldDisableCoreTypingKeepalive: boolean;
   isRoomEvent: boolean;
   dispatchStartedAt: number;
   feedbackRest: RequestClient;
@@ -116,7 +115,8 @@ export function createDiscordMessageReplyRuntime(params: {
       channelId: deliverChannelId,
       rest: params.feedbackRest,
       log: logVerbose,
-      keepaliveIntervalMs: params.shouldDisableCoreTypingKeepalive ? undefined : 0,
+      // Core owns the single cadence so its work-liveness lease can pause and resume it.
+      keepaliveIntervalMs: 0,
     }));
 
   const { onModelSelected, ...replyPipeline } = createChannelMessageReplyPipeline({
@@ -129,6 +129,7 @@ export function createDiscordMessageReplyRuntime(params: {
     typingCallbacks: {
       onReplyStart: () => getTypingFeedback().onReplyStart(),
       onIdle: () => typingFeedback?.onIdle?.(),
+      onBackgroundWorkPause: () => typingFeedback?.onBackgroundWorkPause?.(),
       onCleanup: () => typingFeedback?.onCleanup?.(),
     },
   });

@@ -7,6 +7,12 @@ import { createTypingKeepaliveLoop } from "./typing-lifecycle.js";
 export type TypingCallbacks = {
   onReplyStart: () => Promise<void>;
   onIdle?: () => void;
+  /** Exact channel/account scope for explicitly opted-in public-audience ownership. */
+  backgroundWorkAudienceKey?: string;
+  /** Discord-only opt-in: pause request-scoped keepalive without retiring its audience. */
+  onBackgroundWorkPause?: () => void;
+  /** Installs the core owner-retirement callback for an adapter guard trip. */
+  setBackgroundWorkFailureHandler?: (handler: () => void) => void;
   /** Called when the typing controller is cleaned up (e.g. on NO_REPLY). */
   onCleanup?: () => void;
 };
@@ -21,6 +27,8 @@ export type CreateTypingCallbacksParams = {
   maxConsecutiveFailures?: number;
   /** Maximum duration for typing indicator before auto-cleanup (safety TTL). Default: 60s */
   maxDurationMs?: number;
+  /** Explicit adapter opt-in to request-attributed background-work typing. */
+  backgroundWorkKeepalive?: true;
 };
 
 const DEFAULT_MAX_CONSECUTIVE_TYPING_FAILURES = 2;
@@ -40,6 +48,7 @@ export function createTypingCallbacks(params: CreateTypingCallbacksParams): Typi
   const maxDurationMs = resolveTimerTimeoutMs(params.maxDurationMs, 60_000, 0);
   let closed = false;
   let ttlTimer: ReturnType<typeof setTimeout> | undefined;
+  let onBackgroundWorkFailure: () => void = () => {};
 
   let consecutiveFailures = 0;
   let tripped = false;
@@ -56,6 +65,7 @@ export function createTypingCallbacks(params: CreateTypingCallbacksParams): Typi
       if (consecutiveFailures >= maxConsecutiveFailures) {
         tripped = true;
         keepaliveLoop.stop();
+        onBackgroundWorkFailure();
       }
     }
   };
@@ -121,22 +131,49 @@ export function createTypingCallbacks(params: CreateTypingCallbacksParams): Typi
     await Promise.resolve();
   };
 
-  const fireStop = () => {
-    if (closed) {
-      return;
-    }
-    closed = true;
-    keepaliveLoop.stop();
-    clearTtlTimer();
+  const stopChannelTyping = () => {
     if (!stop) {
       return;
     }
-    // An admitted start may publish activity after cleanup. Its terminal stop
+    // An admitted start may publish activity after a pause or cleanup. Its stop
     // must follow that work so late acknowledgments cannot leave typing visible.
     void (startInFlight ? startInFlight.then(stop) : stop()).catch((err: unknown) =>
       (params.onStopError ?? params.onStartError)(err),
     );
   };
 
-  return { onReplyStart, onIdle: fireStop, onCleanup: fireStop };
+  const firePause = () => {
+    if (closed) {
+      return;
+    }
+    keepaliveLoop.stop();
+    clearTtlTimer();
+    stopChannelTyping();
+  };
+
+  const fireStop = () => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    onBackgroundWorkFailure = () => {};
+    keepaliveLoop.stop();
+    clearTtlTimer();
+    stopChannelTyping();
+  };
+  onBackgroundWorkFailure = fireStop;
+
+  return {
+    onReplyStart,
+    onIdle: fireStop,
+    onCleanup: fireStop,
+    ...(params.backgroundWorkKeepalive === true
+      ? {
+          onBackgroundWorkPause: firePause,
+          setBackgroundWorkFailureHandler(handler: () => void) {
+            onBackgroundWorkFailure = closed ? () => {} : handler;
+          },
+        }
+      : {}),
+  };
 }

@@ -25,8 +25,10 @@ export function createDiscordReplyTypingFeedback(params: {
       token: params.token,
       accountId: params.accountId,
     }).rest;
-  return createTypingCallbacks({
-    start: () => sendTyping({ rest, channelId: params.channelId }),
+  const callbacks = createTypingCallbacks({
+    start: async () => {
+      await sendTyping({ rest, channelId: params.channelId });
+    },
     onStartError: (err) => {
       logTypingFailure({
         log: params.log,
@@ -37,5 +39,10 @@ export function createDiscordReplyTypingFeedback(params: {
     },
     keepaliveIntervalMs: params.keepaliveIntervalMs,
     maxDurationMs: params.maxDurationMs ?? DISCORD_REPLY_TYPING_MAX_DURATION_MS,
+    backgroundWorkKeepalive: true,
   });
+  return {
+    ...callbacks,
+    backgroundWorkAudienceKey: JSON.stringify(["discord", params.accountId, params.channelId]),
+  };
 }

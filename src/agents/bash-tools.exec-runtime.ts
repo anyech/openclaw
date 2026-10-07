@@ -541,6 +541,7 @@ export async function runExecProcess({
   notifyOnExitEmptySuccess?: boolean;
   scopeKey?: string;
   sessionKey?: string;
+  agentRunId?: string;
   agentId?: string;
   /** Start-time routing policy for detached exec system events. */
   eventRouting?: EventSessionRoutingPolicy;
@@ -582,6 +583,7 @@ export async function runExecProcess({
     command: opts.command,
     scopeKey: opts.scopeKey,
     sessionKey: opts.sessionKey,
+    agentRunId: opts.agentRunId,
     cleanupMs: resolveProcessCleanupMs(opts.cleanupMs),
     agentId: opts.agentId,
     eventRouting: opts.eventRouting,

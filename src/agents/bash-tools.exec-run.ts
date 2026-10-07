@@ -604,6 +604,7 @@ export function createExecTool(
           notifyOnExitEmptySuccess,
           scopeKey: defaults?.scopeKey,
           sessionKey: notifySessionKey,
+          agentRunId: defaults?.runId,
           agentId,
           eventRouting: defaults?.eventRouting,
           notifyDeliveryContext,

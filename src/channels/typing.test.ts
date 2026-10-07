@@ -67,6 +67,7 @@ function createTypingHarness(overrides: TypingHarnessOptions = {}) {
     ...(overrides.keepaliveIntervalMs !== undefined
       ? { keepaliveIntervalMs: overrides.keepaliveIntervalMs }
       : {}),
+    ...(overrides.backgroundWorkKeepalive === true ? { backgroundWorkKeepalive: true } : {}),
     ...(overrides.maxDurationMs !== undefined
       ? { maxDurationMs: overrides.maxDurationMs }
       : overrides.useDefaultMaxDuration
@@ -209,6 +210,34 @@ describe("createTypingCallbacks", () => {
       });
     },
   );
+
+  it("exposes a resumable pause only for adapters that opt in", async () => {
+    await withFakeTimers(async () => {
+      const defaultHarness = createTypingHarness();
+      expect(defaultHarness.callbacks.onBackgroundWorkPause).toBeUndefined();
+      const { start, stop, callbacks } = createTypingHarness({
+        keepaliveIntervalMs: 3_000,
+        backgroundWorkKeepalive: true,
+      });
+
+      await callbacks.onReplyStart();
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(start).toHaveBeenCalledTimes(2);
+      callbacks.onBackgroundWorkPause?.();
+      await flushMicrotasks();
+      expect(stop).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(start).toHaveBeenCalledTimes(2);
+
+      await callbacks.onReplyStart();
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(start).toHaveBeenCalledTimes(4);
+      callbacks.onCleanup?.();
+      await flushMicrotasks();
+      expect(stop).toHaveBeenCalledTimes(2);
+    });
+  });
 
   it("invokes stop on idle and reports stop errors", async () => {
     const { stop, onStopError, callbacks } = createTypingHarness({

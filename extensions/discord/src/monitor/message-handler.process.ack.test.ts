@@ -120,7 +120,7 @@ describe("processDiscordMessage ack reactions", () => {
     expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps one typing refresh loop for default message-tool replies", async () => {
+  it("does not add an adapter refresh loop for default message-tool replies", async () => {
     vi.useFakeTimers();
     try {
       dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
@@ -140,8 +140,10 @@ describe("processDiscordMessage ack reactions", () => {
 
       await runProcessDiscordMessage(ctx);
 
-      expect(getLastDispatchReplyOptions()?.typingKeepalive).toBe(false);
-      expect(typingMocks.sendTyping).toHaveBeenCalledTimes(2);
+      const replyOptions = getLastDispatchReplyOptions();
+      expect(replyOptions?.typingKeepalive ?? true).toBe(true);
+      expect(replyOptions?.sourceReplyDeliveryMode).toBe("message_tool_only");
+      expect(typingMocks.sendTyping).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
