@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SubagentRunRecord } from "../../agents/subagents/registry/subagent-registry.types.js";
+import { copySubagentRunRuntimeOwner } from "../../agents/subagents/registry/subagent-run-generation.js";
 import { createReplyBackgroundWorkObserver } from "./typing-background-work.runtime.js";
 
 const owners = vi.hoisted(() => ({
@@ -13,6 +14,7 @@ const owners = vi.hoisted(() => ({
   runListeners: new Map<string, Set<(event: unknown) => void>>(),
 }));
 
+// mock-isolation: mutable requester/generation rows are fixture-owned, not the process-wide live/durable registries.
 vi.mock("../../agents/subagents/registry/subagent-registry-read.js", () => ({
   listSubagentRunsForRequester: (sessionKey: string, options?: { requesterAgentId?: string }) =>
     owners.rows.filter(
@@ -32,47 +34,25 @@ vi.mock("../../agents/subagents/registry/subagent-registry-read.js", () => ({
           (!childAgentId || entry.childAgentId === childAgentId) &&
           (!matches || matches(entry)),
       )
-      .toSorted((left, right) => Number(right.generation ?? 0) - Number(left.generation ?? 0))[0] ??
-    null,
+      .toSorted((left, right) => (right.generation ?? 0) - (left.generation ?? 0))[0] ?? null,
   isSubagentRunLive: (entry: { runId: string }) => owners.liveRunIds.has(entry.runId),
   isSubagentRunQueued: (entry: { runId: string }) => owners.queuedRunIds.has(entry.runId),
 }));
+// mock-isolation: explicit running/input/child-wait facts must not read unrelated live model controllers.
 vi.mock("../../agents/subagents/registry/subagent-execution-observation.js", () => ({
   observeSubagentExecution: (entry: { runId: string }) =>
     owners.observations.get(entry.runId) ?? {
       state: owners.liveRunIds.has(entry.runId) ? "running" : "unknown",
     },
 }));
+// mock-isolation: fixture listeners must be isolated from global registry persistence/session notifications.
 vi.mock("../../agents/subagents/registry/subagent-registry-publication.js", () => ({
   subscribeSubagentRunChanges: (_phase: string, listener: (event: unknown) => void) => {
     owners.registryListeners.add(listener);
     return () => owners.registryListeners.delete(listener);
   },
 }));
-vi.mock("../../agents/subagents/registry/subagent-run-generation.js", () => {
-  const owner = (value: unknown): Partial<SubagentRunRecord> | undefined =>
-    value && typeof value === "object" ? (value as Partial<SubagentRunRecord>) : undefined;
-  return {
-    isSameSubagentRunOwner: (left: unknown, right: unknown) => {
-      const current = owner(left);
-      const expected = owner(right);
-      return (
-        left === right ||
-        Boolean(
-          current &&
-          expected &&
-          current.runId === expected.runId &&
-          current.createdAt === expected.createdAt &&
-          current.generation === expected.generation &&
-          current.childSessionKey === expected.childSessionKey &&
-          current.childAgentId === expected.childAgentId &&
-          current.requesterSessionKey === expected.requesterSessionKey &&
-          current.requesterAgentId === expected.requesterAgentId,
-        )
-      );
-    },
-  };
-});
+// mock-isolation: run-scoped fixture events must not subscribe to unrelated live turns in the shared worker.
 vi.mock("../../infra/agent-events.js", () => ({
   onAgentEventForRun: (runId: string, listener: (event: unknown) => void) => {
     const listeners = owners.runListeners.get(runId) ?? new Set();
@@ -86,6 +66,7 @@ vi.mock("../../infra/agent-events.js", () => ({
     };
   },
 }));
+// mock-isolation: controlled PID/activity rows are separate from OS-managed processes; the real-owner test covers real supervisors.
 vi.mock("../../agents/bash-process-registry.js", () => ({
   listActiveBackgroundProcessSessions: () => [...owners.processes],
   subscribeProcessSessionChanges: (listener: (session: unknown) => void) => {
@@ -230,7 +211,7 @@ describe("reply background work attribution", () => {
     const { observer, onChange } = observe();
     expect(observer.currentState()).toBe("none");
 
-    const transferred = {
+    const transferred = copySubagentRunRuntimeOwner(child, {
       ...child,
       requesterTurnRunId: undefined,
       requesterTurnYielded: undefined,
@@ -242,20 +223,20 @@ describe("reply background work attribution", () => {
         yieldedFinalDeliverable: true as const,
         rearmGeneration: 1,
       },
-    } as unknown as SubagentRunRecord;
+    } as unknown as SubagentRunRecord);
     owners.rows[0] = transferred;
     notifyRegistry();
 
     expect(observer.currentState()).toBe("active");
     expect(onChange).toHaveBeenLastCalledWith("active");
 
-    const rearmed = {
+    const rearmed = copySubagentRunRuntimeOwner(transferred, {
       ...transferred,
       requesterSettleWake: {
         ...transferred.requesterSettleWake!,
         rearmGeneration: 2,
       },
-    } as unknown as SubagentRunRecord;
+    } as unknown as SubagentRunRecord);
     owners.rows[0] = rearmed;
     notifyRegistry();
 

@@ -33,9 +33,9 @@ describe("ask_user human wait liveness events", () => {
   }) => {
     const runId = "run-ask-user-human-wait";
     const sessionKey = "agent:main:discord:channel:ask-user-human-wait";
-    const answerStarted = createDeferred<void>();
-    const promptDelivered = createDeferred<void>();
-    const waitStarted = createDeferred<void>();
+    const answerStarted = createDeferred();
+    const promptDelivered = createDeferred();
+    const waitStarted = createDeferred();
     let finishAnswer: ((value: unknown) => void) | undefined;
     const gatewayCall = (async (
       method: string,

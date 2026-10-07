@@ -5,6 +5,12 @@ import path from "node:path";
 import { resolveSecureTempRoot } from "@openclaw/fs-safe/temp";
 import JSON5 from "json5";
 import { afterAll, beforeAll, expect, it, onTestFailed, vi } from "vitest";
+import { dispatchInboundMessageWithBufferedDispatcher } from "../../src/auto-reply/dispatch.js";
+import { finalizeInboundContext } from "../../src/auto-reply/reply/inbound-context.js";
+import {
+  createChannelReplyPipeline,
+  createTypingCallbacks,
+} from "../../src/channels/message/reply-pipeline.js";
 import {
   clearRuntimeConfigSnapshot,
   getRuntimeConfig,
@@ -12,17 +18,17 @@ import {
   readConfigFileSnapshot,
   resetConfigRuntimeState,
   setRuntimeConfigSnapshot,
-} from "../../../../src/config/config.js";
-import type { OpenClawConfig } from "../../../../src/config/types.openclaw.js";
-import type { GatewayServerOptions } from "../../../../src/gateway/server.js";
-import { registerSealedRuntime } from "../../../../src/infra/sealed-runtime-registry.js";
-import { flushLogger, resetLogger, setLoggerOverride } from "../../../../src/logging/logger.js";
+} from "../../src/config/config.js";
+import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
+import type { GatewayServerOptions } from "../../src/gateway/server.js";
+import { registerSealedRuntime } from "../../src/infra/sealed-runtime-registry.js";
+import { flushLogger, resetLogger, setLoggerOverride } from "../../src/logging/logger.js";
 import {
   writeOpenAiResponsesText,
   writeOpenAiResponsesSse,
-} from "../../../../test/helpers/openai-responses-sse.js";
-import { useAutoCleanupTempDirTracker } from "../../../../test/helpers/temp-dir.js";
-import { ChannelType } from "../internal/discord.js";
+} from "../helpers/openai-responses-sse.js";
+import { createDeferred } from "../helpers/promise.js";
+import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 import {
   createConfig,
   readBody,
@@ -41,7 +47,7 @@ import {
   handleDiscordRest,
   type DiscordRestEvent,
   type ProviderRouteEvidence,
-} from "./reply-typing-active.e2e-test-helpers.js";
+} from "./discord-typing-active.e2e-test-helpers.js";
 
 type Scenario = "child" | "child-yield" | "child-error" | "child-cancel";
 const terminalScenarios: readonly Scenario[] = [
@@ -57,6 +63,7 @@ const fixtureChannelIds = [
   "111111111111111115",
 ];
 let nonce: string;
+let fixtureRestBase: string;
 let restEvents: DiscordRestEvent[] = [];
 let model: Awaited<ReturnType<typeof startTextModel>>;
 let config: OpenClawConfig;
@@ -77,7 +84,8 @@ let successorDelivered = new Promise<void>((resolve) => {
 });
 let successorStartedAt: number | undefined, successorFinalAt: number | undefined;
 const activeOverlapWaitStarts = new Set<"parent" | "child">();
-let activeOverlapSamplePromise: Promise<boolean> | undefined;
+let activeOverlapSample = createDeferred();
+let activeOverlapSampleStarted = false;
 let childRunId: string | undefined, childSessionKey: string | undefined;
 let childToolStartedAt: number | undefined;
 let childToolStarted = new Promise<void>(() => {});
@@ -88,14 +96,9 @@ let cancelAt: number | undefined;
 let caseStartedAt: number | undefined, requesterReturnAt: number | undefined;
 let successorWaitStartedAt: number | undefined, successorWaitTimeoutMs: number | undefined;
 let recordPhase: (value: string) => Promise<void> = async () => {};
-let processDiscordMessage: typeof import("./message-handler.process.js").processDiscordMessage;
-let preflightDiscordMessage: typeof import("./message-handler.preflight.js").preflightDiscordMessage;
-let createDiscordMessage: typeof import("./message-handler.preflight.test-helpers.js").createDiscordMessage;
-let createDiscordPreflightArgs: typeof import("./message-handler.preflight.test-helpers.js").createDiscordPreflightArgs;
-let createGuildEvent: typeof import("./message-handler.preflight.test-helpers.js").createGuildEvent;
 const modelServers: Array<{ close: () => Promise<void> }> = [];
 const restServers: Array<{ close: () => Promise<void> }> = [];
-let privateGateway: import("../../../../src/gateway/server.js").GatewayServer | undefined;
+let privateGateway: import("../../src/gateway/server.js").GatewayServer | undefined;
 let restoreStageEnv: (() => void) | undefined;
 let savedDiscordApiUrl: string | undefined;
 let savedConfigPath: string | undefined;
@@ -135,11 +138,7 @@ beforeAll(async () => {
   originalFetch = globalThis.fetch;
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const target = new URL(
-      input instanceof Request
-        ? input.url
-        : input instanceof URL
-          ? input.toString()
-          : String(input),
+      input instanceof Request ? input.url : input instanceof URL ? input.toString() : input,
     );
     if (
       target.protocol !== "http:" ||
@@ -219,6 +218,7 @@ beforeAll(async () => {
   }
   allowedLoopbackPorts.add(String(restAddress.port));
   const restBase = "http://127.0.0.1:" + restAddress.port + "/api/v10";
+  fixtureRestBase = restBase;
   expect(await (await fetch(restBase + "/identity")).json()).toEqual({
     nonce,
     port: restAddress.port,
@@ -265,7 +265,7 @@ beforeAll(async () => {
   delete process.env.OPENCLAW_SKIP_CHANNELS;
   delete process.env.OPENCLAW_SKIP_PROVIDERS;
   const { acquireGatewayE2ePortBlock, startClaimedGateway } =
-    await import("../../../../src/gateway/test-helpers.listener.js");
+    await import("../../src/gateway/test-helpers.listener.js");
   const gatewayClaim = await acquireGatewayE2ePortBlock();
   gatewayPort = gatewayClaim.port;
   const configDraft = createConfig(nonce, model.url, runRoot, guildId, channelId);
@@ -325,7 +325,7 @@ beforeAll(async () => {
   expect(runtimeConfig.models?.providers?.["typing-" + nonce]?.models?.[0]?.id).toBe(
     "typing-" + nonce,
   );
-  const { startGatewayServer } = await import("../../../../src/gateway/server.js");
+  const { startGatewayServer } = await import("../../src/gateway/server.js");
   const gatewayStartOptions: GatewayServerOptions = {
     bind: "loopback",
     host: "127.0.0.1",
@@ -347,7 +347,7 @@ beforeAll(async () => {
   );
   allowedLoopbackPorts.add(String(gatewayClaim.port));
   const { connectGatewayClient, disconnectGatewayClient } =
-    await import("../../../../src/gateway/test-helpers.e2e.js");
+    await import("../../src/gateway/test-helpers.e2e.js");
   const identityUrl = "ws://127.0.0.1:" + gatewayClaim.port;
   assertFixtureWebSocketTarget(identityUrl);
   const identityClient = await connectGatewayClient({ url: identityUrl, token: nonce });
@@ -361,10 +361,10 @@ beforeAll(async () => {
     await disconnectGatewayClient(identityClient);
   }
   await recordPhase("isolated-gateway-ready-identity-verified");
-  const { createPluginRuntime } = await import("../../../../src/plugins/runtime/index.js");
+  const { createPluginRuntime } = await import("../../src/plugins/runtime/index.js");
   const realRuntime = createPluginRuntime();
   await recordPhase("real-plugin-runtime-created");
-  const { setDiscordRuntime } = await import("../runtime.js");
+  const { setDiscordRuntime } = await import("../../extensions/discord/runtime-api.js");
   setDiscordRuntime(realRuntime);
   await recordPhase("discord-runtime-set");
   const channelInbound = await import("openclaw/plugin-sdk/channel-inbound");
@@ -374,12 +374,8 @@ beforeAll(async () => {
     vi.isMockFunction(realRuntime.channel.reply.dispatchReplyWithBufferedBlockDispatcher),
   ).toBe(false);
   expect(vi.isMockFunction(realRuntime.agent.runEmbeddedAgent)).toBe(false);
-  ({ processDiscordMessage } = await import("./message-handler.process.js"));
-  ({ preflightDiscordMessage } = await import("./message-handler.preflight.js"));
-  ({ createDiscordMessage, createDiscordPreflightArgs, createGuildEvent } =
-    await import("./message-handler.preflight.test-helpers.js"));
-  await import("../../../../src/auto-reply/reply/get-reply.js");
-  const { getLoadedChannelPlugin } = await import("../../../../src/channels/plugins/index.js");
+  await import("../../src/auto-reply/reply/get-reply.js");
+  const { getLoadedChannelPlugin } = await import("../../src/channels/plugins/index.js");
   const heartbeat = getLoadedChannelPlugin("discord")?.heartbeat;
   if (heartbeat?.sendTypingGuarded) {
     const original = heartbeat.sendTypingGuarded;
@@ -398,13 +394,13 @@ beforeAll(async () => {
     };
   }
   await recordPhase("source-dispatch-modules-imported");
-  const { onAgentEvent } = await import("../../../../src/infra/agent-events.js");
+  const { onAgentEvent } = await import("../../src/infra/agent-events.js");
   const { hasLiveAgentRunContext, getAgentRunContext } =
-    await import("../../../../src/infra/agent-run-registry.js");
+    await import("../../src/infra/agent-run-registry.js");
   const { getSubagentRunByRunId } =
-    await import("../../../../src/agents/subagents/registry/subagent-registry.js");
+    await import("../../src/agents/subagents/registry/subagent-registry.js");
   const { isSubagentRunLive } =
-    await import("../../../../src/agents/subagents/registry/subagent-run-liveness.js");
+    await import("../../src/agents/subagents/registry/subagent-run-liveness.js");
   unsubscribeEvents = onAgentEvent((evt) => {
     if (evt.stream !== "lifecycle" && evt.stream !== "tool") {
       return;
@@ -475,9 +471,14 @@ beforeAll(async () => {
     if (waitRole) {
       activeOverlapWaitStarts.add(waitRole);
       if (activeOverlapWaitStarts.size === 2) {
-        activeOverlapSamplePromise ??= sampleLive("active-parent-and-child")
-          .then(() => true)
-          .catch(() => false);
+        if (!activeOverlapSampleStarted) {
+          activeOverlapSampleStarted = true;
+          const sampled = activeOverlapSample;
+          void sampleLive("active-parent-and-child").then(
+            () => sampled.resolve(),
+            (error: unknown) => sampled.reject(error),
+          );
+        }
       }
     }
   });
@@ -517,7 +518,8 @@ it(
       liveSamples.length = 0;
       terminalRuns.length = 0;
       activeOverlapWaitStarts.clear();
-      activeOverlapSamplePromise = undefined;
+      activeOverlapSample = createDeferred();
+      activeOverlapSampleStarted = false;
       privateSuccessorStarted = false;
       successorStartedAt = undefined;
       successorFinalAt = undefined;
@@ -537,81 +539,87 @@ it(
       await writeFile(path.join(runRoot, "tool-trace.jsonl"), "");
       await recordPhase("case-start-" + scenario);
       const marker = "DISCORD_TYPING_" + scenario.toUpperCase();
-      const message = createDiscordMessage({
-        id: "typing-e2e-message-" + scenario,
-        channelId,
-        content: "<@444444444444444444> " + marker,
-        author: { id: "333333333333333333", username: "Fixture User", bot: false },
-        mentionedUsers: [{ id: "444444444444444444", username: "OpenClaw" }],
+      const requesterSessionKey = "agent:main:discord:channel:" + channelId;
+      const coreDispatchRuntimeEvents: string[] = [];
+      const processEvents: string[] = [];
+      const inbound = finalizeInboundContext({
+        Body: marker,
+        BodyForAgent: marker,
+        RawBody: marker,
+        CommandBody: marker,
+        From: "discord:channel:" + channelId,
+        To: "channel:" + channelId,
+        SessionKey: requesterSessionKey,
+        AccountId: "default",
+        Provider: "discord",
+        Surface: "discord",
+        ChatType: "group",
+        ConversationLabel: "Core-owned typing fixture",
+        SenderId: "333333333333333333",
+        SenderName: "Fixture User",
+        MessageSid: "typing-e2e-message-" + scenario,
+        OriginatingChannel: "discord",
+        OriginatingTo: "channel:" + channelId,
+        NativeChannelId: channelId,
+        WasMentioned: true,
+        CommandAuthorized: true,
+        Timestamp: Date.now(),
       });
-      const client = {
-        fetchChannel: async (id: string) =>
-          id === channelId ? { id, type: ChannelType.GuildText, name: "general" } : null,
-      } as unknown as import("../internal/discord.js").Client;
-      const discordConfig = config.channels?.discord;
-      if (!discordConfig) {
-        throw new Error("fixture Discord config missing");
-      }
-      const preflightRuntimeEvents: string[] = [];
-      const preflight = await preflightDiscordMessage({
-        ...createDiscordPreflightArgs({
-          botUserId: "444444444444444444",
-          cfg: config,
-          discordConfig,
-          data: createGuildEvent({ channelId, guildId, author: message.author, message }),
-          client,
-        }),
-        guildEntries: {
-          [guildId]: {
-            users: ["discord:333333333333333333"],
-            channels: {
-              [channelId]: {
-                enabled: true,
-                requireMention: false,
-                users: ["discord:333333333333333333"],
-              },
-            },
+      const rawTyping = createTypingCallbacks({
+        start: async () => {
+          const response = await fetch(fixtureRestBase + "/channels/" + channelId + "/typing", {
+            method: "POST",
+            headers: { Authorization: "Bot " + nonce },
+          });
+          if (!response.ok) {
+            throw new Error("fixture typing transport failed: " + response.status);
+          }
+        },
+        intervalMs: 0,
+        maxDurationMs: 0,
+        backgroundWorkKeepalive: true,
+      });
+      const pipeline = createChannelReplyPipeline({
+        cfg: config,
+        agentId: "main",
+        channel: "discord",
+        accountId: "default",
+        typingCallbacks: {
+          ...rawTyping,
+          backgroundWorkAudienceKey: JSON.stringify(["discord", "default", channelId]),
+        },
+      });
+      typingOwnerDiagnostic.bindRequest(requesterSessionKey, "main");
+      expect(inbound.BodyForAgent).toContain(marker);
+      expect(inbound.ChatType).toBe("group");
+      await dispatchInboundMessageWithBufferedDispatcher({
+        ctx: inbound,
+        cfg: config,
+        replyOptions: {
+          onModelSelected: pipeline.onModelSelected,
+          sourceReplyDeliveryMode: "message_tool_only",
+        },
+        dispatcherOptions: {
+          ...pipeline,
+          deliver: async (payload, info) => {
+            if (!payload.text) {
+              throw new Error("typing fixture expected an observable text delivery");
+            }
+            processEvents.push(info.kind + "-start");
+            const response = await fetch(fixtureRestBase + "/channels/" + channelId + "/messages", {
+              method: "POST",
+              headers: { Authorization: "Bot " + nonce, "Content-Type": "application/json" },
+              body: JSON.stringify({ content: payload.text }),
+            });
+            if (!response.ok) {
+              throw new Error("fixture reply transport failed: " + response.status);
+            }
+            processEvents.push(info.kind + "-delivered");
+          },
+          onError: (error) => {
+            coreDispatchRuntimeEvents.push("core-dispatch-error:" + String(error));
           },
         },
-        allowFrom: ["discord:333333333333333333"],
-        cfg: config,
-        token: nonce,
-        runtime: {
-          log: (value: string) => preflightRuntimeEvents.push("log:" + value),
-          error: (value: string) => preflightRuntimeEvents.push("error:" + value),
-          exit: (code: number): never => {
-            throw new Error("exit " + code);
-          },
-        } as import("openclaw/plugin-sdk/runtime-env").RuntimeEnv,
-      });
-      if (!preflight) {
-        throw new Error("Discord preflight rejected the synthetic guild message");
-      }
-      typingOwnerDiagnostic.bindRequest(preflight.route.sessionKey, preflight.route.agentId);
-      expect(preflight.messageText).toContain(marker);
-      expect(preflight.isGuildMessage).toBe(true);
-      const ingress = await preflight.resolveChannelIngress({
-        agentId: preflight.route.agentId,
-        sessionKey: preflight.route.sessionKey,
-        messageId: preflight.canonicalMessageId ?? preflight.message.id,
-        nativeChannelId: preflight.messageChannelId,
-        inboundEventKind: preflight.inboundEventKind,
-      });
-      expect(ingress.ingress.decision).toBe("allow");
-      expect(ingress.senderAccess.allowed).toBe(true);
-      expect(ingress.routeAccess.allowed).toBe(true);
-      const processEvents: string[] = [];
-      await processDiscordMessage(preflight, {
-        onReplyPlanResolved: (value) =>
-          processEvents.push(
-            "plan:" +
-              JSON.stringify({
-                sessionKey: value.sessionKey,
-                createdThreadId: value.createdThreadId,
-              }),
-          ),
-        onFinalReplyStart: () => processEvents.push("final-start"),
-        onFinalReplyDelivered: () => processEvents.push("final-delivered"),
       });
 
       await typingOwnerDiagnostic.ready();
@@ -678,10 +686,10 @@ it(
 
       const diagnostics = JSON.stringify({
         scenario,
-        route: preflight.route,
-        ingress: ingress.ingress.decision,
+        route: { agentId: "main", sessionKey: requesterSessionKey },
+        admission: "fixture-owned finalized core context; plugin preflight not claimed",
         processEvents,
-        preflightRuntimeEvents,
+        coreDispatchRuntimeEvents,
         modelPaths: model.paths,
         restPaths: restEvents.map((event) => event.path),
         websocketTargets,
@@ -726,10 +734,10 @@ it(
         ? trace.split(String.fromCharCode(10)).map((line) => JSON.parse(line))
         : [];
       if (scenario === "child") {
-        const activeSamplePromise = activeOverlapSamplePromise;
-        if (!(await activeSamplePromise)) {
-          throw new Error("active parent/child liveness sampling failed");
+        if (activeOverlapWaitStarts.size !== 2) {
+          throw new Error("active parent/child liveness sampling did not start");
         }
+        await activeOverlapSample.promise;
         const parentStart = toolEvents.find(
           (event) => event.phase === "start" && event.label === "parent",
         );
@@ -813,7 +821,7 @@ async function startTextModel(modelNonce: string) {
   const paths: string[] = [];
   const routeEvidence: ProviderRouteEvidence[] = [];
   const server = createServer((request, response) => {
-    void handleModelRequest(request, response).catch((error) => {
+    void handleModelRequest(request, response).catch((error: unknown) => {
       void recordPhase("fixture-model-handler-error-" + String(error));
       if (!response.headersSent) {
         response.writeHead(400, { "content-type": "application/json" });

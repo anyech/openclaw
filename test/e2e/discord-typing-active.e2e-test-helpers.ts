@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import path from "node:path";
 import { expect } from "vitest";
-import type { SubagentRunRecord } from "../../../../src/agents/subagents/registry/subagent-registry.types.js";
-import type { OpenClawConfig } from "../../../../src/config/types.openclaw.js";
+import type { SubagentRunRecord } from "../../src/agents/subagents/registry/subagent-registry.types.js";
+import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 
 export type TypingE2eScenario = "child" | "child-yield" | "child-error" | "child-cancel";
 
@@ -369,7 +369,7 @@ export function handleDiscordRest(
   response: ServerResponse,
   restNonce: string,
   events: DiscordRestEvent[],
-  onPhase: (value: string) => void,
+  onPhase: (value: string) => void | Promise<void>,
   expectedSuccessorMarker: string | undefined,
   onSuccessorReply: () => void,
 ) {
@@ -436,15 +436,15 @@ export async function abortOwnedChild(
   sample: (label: string) => Promise<void>,
 ) {
   const { getSubagentRunByRunId } =
-    await import("../../../../src/agents/subagents/registry/subagent-registry.js");
+    await import("../../src/agents/subagents/registry/subagent-registry.js");
   const { isSubagentRunLive } =
-    await import("../../../../src/agents/subagents/registry/subagent-run-liveness.js");
+    await import("../../src/agents/subagents/registry/subagent-run-liveness.js");
   const entry = getSubagentRunByRunId(runId);
   expect(entry?.childSessionKey).toBe(expectedChildSessionKey);
   expect(isSubagentRunLive(entry)).toBe(true);
   await sample("before-exact-child-cancel");
   const { connectGatewayClient, disconnectGatewayClient } =
-    await import("../../../../src/gateway/test-helpers.e2e.js");
+    await import("../../src/gateway/test-helpers.e2e.js");
   const url = "ws://127.0.0.1:" + gatewayPort;
   assertTarget(url);
   const client = await connectGatewayClient({ url, token });
@@ -552,7 +552,7 @@ export function createTypingOwnerDiagnostic() {
         setup = Promise.resolve();
         return;
       }
-      setup = import("../../../../src/auto-reply/reply/typing-background-work.runtime.js")
+      setup = import("../../src/auto-reply/reply/typing-background-work.runtime.js")
         .then(({ createReplyBackgroundWorkObserver }) => {
           observer = createReplyBackgroundWorkObserver({
             sessionKey: requesterSessionKey!,
@@ -597,10 +597,10 @@ export function createLiveSubagentSampler(params: {
 }) {
   return async (label: string) => {
     const { getSubagentRunByRunId } =
-      await import("../../../../src/agents/subagents/registry/subagent-registry.js");
+      await import("../../src/agents/subagents/registry/subagent-registry.js");
     const { isSubagentRunLive } =
-      await import("../../../../src/agents/subagents/registry/subagent-run-liveness.js");
-    const { hasLiveAgentRunContext } = await import("../../../../src/infra/agent-run-registry.js");
+      await import("../../src/agents/subagents/registry/subagent-run-liveness.js");
+    const { hasLiveAgentRunContext } = await import("../../src/infra/agent-run-registry.js");
     const ids = [...new Set(params.agentEvidence.map((event) => String(event.runId)))];
     for (const id of ids) {
       const child = getSubagentRunByRunId(id);

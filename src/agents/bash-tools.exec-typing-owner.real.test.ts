@@ -22,7 +22,10 @@ import { resetProcessRegistryForTests } from "./bash-process-registry.test-suppo
 import { runExecProcess } from "./bash-tools.exec-runtime.js";
 import { createProcessTool } from "./bash-tools.process.js";
 
-vi.mock("../process/supervisor/index.js", () => ({ getProcessSupervisor: () => supervisor }));
+vi.mock("../process/supervisor/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../process/supervisor/index.js")>()),
+  getProcessSupervisor: () => supervisor,
+}));
 
 let supervisor: ReturnType<typeof createProcessSupervisor>;
 let scopeKey = "";
