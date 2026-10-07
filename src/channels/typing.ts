@@ -114,8 +114,12 @@ export function createTypingCallbacks(params: CreateTypingCallbacksParams): Typi
     if (closed) {
       return;
     }
-    consecutiveFailures = 0;
-    tripped = false;
+    // Background-owned typing spans core refresh callbacks; retain its failure
+    // count until a transport start succeeds so the circuit breaker can retire it.
+    if (params.backgroundWorkKeepalive !== true) {
+      consecutiveFailures = 0;
+      tripped = false;
+    }
     clearTtlTimer();
     const startPromise = fireStart();
     void startPromise.then(() => {
