@@ -165,7 +165,9 @@ export function createTypingCallbacks(params: CreateTypingCallbacksParams): Typi
     clearTtlTimer();
     stopChannelTyping();
   };
-  onBackgroundWorkFailure = fireStop;
+  if (params.backgroundWorkKeepalive === true) {
+    onBackgroundWorkFailure = fireStop;
+  }
 
   return {
     onReplyStart,
