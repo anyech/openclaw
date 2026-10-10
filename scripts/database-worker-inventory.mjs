@@ -2117,6 +2117,7 @@ const workerModules = new Set([
   "src/config/sessions/session-accessor.sqlite-archive-selection.ts", // Archive worker read-page selection only.
   "src/config/sessions/session-accessor.sqlite-mutation-worker.runtime.ts",
   "src/config/sessions/session-accessor.sqlite-summary.ts", // Only session-transcript.worker.ts dispatches the summary kernel at runtime.
+  "src/config/sessions/session-accessor.sqlite-event-time.ts", // Durable event-time SQL is reached only through usage-worker access; incognito host reads use canonical projection frames.
   "src/config/sessions/session-accessor.sqlite-transcript-binding.ts", // History worker transcript-binding reader only.
   "src/config/sessions/session-cold-storage-selection.ts", // Cold preparation and mutation kernels in session-cold-storage-worker.ts only.
   "src/config/sessions/session-cold-storage-worker.ts", // Archive worker cold-prepare and cold-mutate dispatchers only.
@@ -2149,6 +2150,7 @@ const workerModules = new Set([
   "src/infra/push-apns-store-transaction.ts", // APNs worker cleanup and pairing worker clearApnsNodeIds only.
   "src/infra/push-apns-store.ts", // SQL read kernels are called only by the APNs worker dispatcher.
   "src/infra/session-cost-usage-worker.ts",
+  "src/infra/session-cost-usage-worker-event-time-access.ts", // Event-time SQL access is constructed only inside the usage-cost worker.
   "src/infra/telemetry-store.kernel.ts", // Telemetry SQL executes through the shared-state worker runtime.
   "src/infra/update-candidate-exec-approvals.ts", // Approval projections run in the update-candidate-state worker.
   "src/infra/update-candidate-plugins.ts", // Plugin inventory and copying run in the update-candidate-state worker.

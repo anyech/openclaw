@@ -20,7 +20,6 @@ import {
   resolveSessionTranscriptsDirForAgent,
 } from "../config/sessions/paths.js";
 import type { SessionTranscriptStats } from "../config/sessions/session-accessor.sqlite-contract.js";
-import { sessionTranscriptEventsOverlapRange } from "../config/sessions/session-accessor.sqlite-event-time.js";
 import { listSessionTranscriptArchivesReadOnly } from "../config/sessions/session-accessor.sqlite-history.js";
 import { withSessionEntryReadOnlyInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import {
@@ -52,6 +51,26 @@ import type { UsageCostTranscriptFile } from "./session-cost-usage.types.js";
 
 const USAGE_COST_TRANSCRIPT_STAT_CONCURRENCY = 32;
 const USAGE_COST_EVENT_TIME_PREFLIGHT_CONCURRENCY = 4;
+
+async function requireUsageSqliteEventTimeDecision(
+  access: UsageCostCollectionAccess,
+  marker: SqliteSessionFileMarker,
+  range: SessionTranscriptEventTimeRange,
+  updatedAtMs: number | null | undefined,
+  file: UsageCostSqliteFile,
+): Promise<boolean> {
+  const preflight = access.preflightSqliteEventTime;
+  if (!preflight) {
+    throw new Error(
+      "Usage SQLite event-time preflight is required before transcript materialization",
+    );
+  }
+  const decision = await preflight(marker, range, updatedAtMs, file);
+  if (decision === undefined) {
+    throw new Error("Usage SQLite event-time preflight did not return a range decision");
+  }
+  return decision;
+}
 
 export type UsageCostCollectionAccess = {
   env?: NodeJS.ProcessEnv;
@@ -294,22 +313,13 @@ export async function listUsageCountedTranscriptSources(
           if (!file) {
             return undefined;
           }
-          const cachedDecision = params.preflightSqliteEventTime
-            ? await params.preflightSqliteEventTime(
-                marker,
-                params.eventTimeRange!,
-                instance.updatedAtMs,
-                file,
-              )
-            : undefined;
-          const overlapsRange =
-            cachedDecision ??
-            (await sessionTranscriptEventsOverlapRange(
-              marker,
-              params.eventTimeRange!,
-              instance.updatedAtMs,
-              params.env,
-            ));
+          const overlapsRange = await requireUsageSqliteEventTimeDecision(
+            params,
+            marker,
+            params.eventTimeRange!,
+            instance.updatedAtMs,
+            file,
+          );
           return overlapsRange ? marker : undefined;
         }),
         limit: USAGE_COST_EVENT_TIME_PREFLIGHT_CONCURRENCY,
@@ -474,15 +484,13 @@ export async function resolveUsageCostTranscriptFilesInEventTimeRange(
       } else {
         const marker = parseSqliteSessionFileMarker(source.filePath);
         if (marker) {
-          const cachedDecision = await access.preflightSqliteEventTime?.(
+          const overlapsRange = await requireUsageSqliteEventTimeDecision(
+            access,
             marker,
             range,
             undefined,
             source,
           );
-          const overlapsRange =
-            cachedDecision ??
-            (await sessionTranscriptEventsOverlapRange(marker, range, undefined, access.env));
           if (!overlapsRange) {
             return undefined;
           }

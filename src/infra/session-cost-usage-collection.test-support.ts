@@ -1,5 +1,6 @@
 import { materializeSessionArchiveForRead } from "../config/sessions/archive-compression.js";
 import { listSessionTranscriptInstances } from "../config/sessions/session-accessor.sqlite-entry.js";
+import { sessionTranscriptEventsOverlapRange } from "../config/sessions/session-accessor.sqlite-event-time.js";
 import {
   readTranscriptStatsBatchReadOnlySync,
   readTranscriptStatsSync,
@@ -24,6 +25,8 @@ export function createNativeStorageUsageAccess(env?: NodeJS.ProcessEnv): UsageCo
         ? scopes.map(readTranscriptStatsSync)
         : readTranscriptStatsBatchReadOnlySync(scopes).map((stats) => stats ?? undefined);
     },
+    preflightSqliteEventTime: (marker, range, updatedAtMs) =>
+      sessionTranscriptEventsOverlapRange(marker, range, updatedAtMs, env),
   };
 }
 

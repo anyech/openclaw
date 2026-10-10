@@ -16,8 +16,10 @@ import type {
   IncognitoSessionAuthority,
   IncognitoSessionFacts,
 } from "../config/sessions/session-incognito-contract.js";
+import { transcriptMetadataMayOverlapRange } from "../config/sessions/transcript-event-time.js";
 import { getAsyncWorkSignal, runOutsideAsyncWorkScope } from "../shared/async-work-scope.js";
 import type { SessionCostUsageRollupSnapshot } from "./session-cost-usage-cache.kernel.js";
+import { memoryTranscriptFramesMayOverlapRange } from "./session-cost-usage-event-time-frames.js";
 import type { UsageCostWorkerHostRequest } from "./session-cost-usage-worker.types.js";
 
 export type UsageCostIncognitoBinding = {
@@ -311,6 +313,58 @@ export function createIncognitoUsageCostAdapter(
               );
             }),
           );
+        case "memory-event-time": {
+          const selectedTarget = assertMarker(request.input.marker);
+          compute.assertCurrent();
+          signal?.throwIfAborted();
+          if (transcriptMetadataMayOverlapRange(request.input.updatedAtMs, request.input.range)) {
+            return true;
+          }
+          const stats = await compute.execute(
+            {
+              type: "session.compute.usage.stats",
+              input: { ...selectedTarget, request: {} },
+            },
+            signal,
+          );
+          compute.assertCurrent();
+          signal?.throwIfAborted();
+          if (!stats || stats.eventCount === 0) {
+            return false;
+          }
+          const sourceId = randomUUID();
+          await compute.execute(
+            {
+              type: "session.compute.source.open",
+              input: { ...selectedTarget, sourceId },
+            },
+            signal,
+          );
+          compute.assertCurrent();
+          signal?.throwIfAborted();
+          const overlapsRange = await memoryTranscriptFramesMayOverlapRange(
+            async () => {
+              compute.assertCurrent();
+              signal?.throwIfAborted();
+              const frame = await compute.execute(
+                {
+                  type: "session.compute.source.read",
+                  input: { ...selectedTarget, sourceId },
+                },
+                signal,
+              );
+              compute.assertCurrent();
+              signal?.throwIfAborted();
+              return frame;
+            },
+            request.input.range,
+            signal,
+          );
+          compute.assertCurrent();
+          signal?.throwIfAborted();
+          // The enclosing compute scope owns the source mapping and its final cleanup.
+          return overlapsRange;
+        }
         case "memory-cache":
           return compute.execute(
             {

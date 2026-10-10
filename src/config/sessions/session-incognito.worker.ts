@@ -150,10 +150,14 @@ export function createIncognitoSessionWorker(
       throw new Error("Incognito actor requires an incognito session key");
     }
   };
-  const prepareFacts = (stage: "transaction" | "commit", keys: readonly string[]) => {
+  const prepareFacts = (
+    stage: "transaction" | "commit",
+    keys: readonly string[],
+    admission?: { unchangedSessionFacts?: true },
+  ) => {
     keys.forEach(assertKey);
     const facts = keys.flatMap((key) => read(key).facts);
-    if (stage === "commit") {
+    if (stage === "commit" && !admission?.unchangedSessionFacts) {
       const nextRevision = revision + 1;
       facts.forEach((fact) => {
         fact.revision = nextRevision;
@@ -185,8 +189,9 @@ export function createIncognitoSessionWorker(
     },
     restriction?: AgentDatabaseAdmissionRestriction,
     entry?: { guarded?: boolean; publication?: unknown },
+    sessionAdmission?: { unchangedSessionFacts?: true },
   ) => {
-    const facts = prepareFacts(stage, keys);
+    const facts = prepareFacts(stage, keys, sessionAdmission);
     if (stage === "commit") {
       deferSqliteWorkerCommitReceipt(
         database.db,
@@ -208,7 +213,12 @@ export function createIncognitoSessionWorker(
   );
   const outbox = createIncognitoOutboxWorker(database, admit);
 
-  const compute = createIncognitoComputeWorker(database, env, admit);
+  const computeAdmission = (
+    stage: "transaction" | "commit",
+    keys: readonly string[],
+    sessionAdmission?: { unchangedSessionFacts?: true },
+  ) => admit(stage, keys, undefined, undefined, undefined, sessionAdmission);
+  const compute = createIncognitoComputeWorker(database, env, computeAdmission);
   const entryAdmission = (
     stage: "transaction" | "commit",
     keys: readonly string[],

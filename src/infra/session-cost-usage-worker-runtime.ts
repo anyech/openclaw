@@ -13,10 +13,6 @@ import {
 } from "../config/sessions/legacy-sqlite-marker.js";
 import { listSessionTranscriptInstances } from "../config/sessions/session-accessor.js";
 import {
-  readSessionTranscriptEventTimeSourceFromDatabase,
-  sessionTranscriptEventTimeSourceOverlapsRange,
-} from "../config/sessions/session-accessor.sqlite-event-time.js";
-import {
   resolveSqliteReadScope,
   toDatabaseOptions,
 } from "../config/sessions/session-accessor.sqlite-scope.js";
@@ -25,6 +21,7 @@ import { restoreSessionColdTranscript } from "../config/sessions/session-cold-st
 import { listDurableSqliteTargetPathsForSessionStorePath } from "../config/sessions/session-sqlite-target.js";
 import { resolveSessionStorePathForScope } from "../config/sessions/session-store-path.js";
 import { createMemoryTranscriptProjectionSource } from "../config/sessions/session-transcript-reconcile-memory.js";
+import { transcriptMetadataMayOverlapRange } from "../config/sessions/transcript-event-time.js";
 import { resolveStateDir } from "../config/state-dir.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -45,6 +42,7 @@ import {
   type SessionCostUsageRollupSnapshot,
 } from "./session-cost-usage-cache.kernel.js";
 import { prepareSessionCostUsageRefreshLock } from "./session-cost-usage-cache.sqlite.js";
+import { memoryTranscriptFramesMayOverlapRange } from "./session-cost-usage-event-time-frames.js";
 import {
   createIncognitoUsageCostAdapter,
   createUsageCostIncognitoReadObservation,
@@ -507,13 +505,38 @@ async function runPreparedUsageCostWorker(
                     if (!binding.database) {
                       throw new Error("Usage memory transcript database is unavailable");
                     }
-                    const source = readSessionTranscriptEventTimeSourceFromDatabase(
+                    assertRequestCurrent();
+                    if (transcriptMetadataMayOverlapRange(updatedAtMs, range)) {
+                      output = true;
+                      break;
+                    }
+                    const stats = readTranscriptStatsBatchFromDatabase(binding.database, [
+                      marker.sessionId,
+                    ])[0];
+                    assertRequestCurrent();
+                    if (!stats || stats.eventCount === 0) {
+                      output = false;
+                      break;
+                    }
+                    const memorySource = createMemoryTranscriptProjectionSource(
                       binding.database,
-                      marker,
-                      range,
-                      updatedAtMs,
+                      binding.options,
                     );
-                    output = await sessionTranscriptEventTimeSourceOverlapsRange(source, range);
+                    try {
+                      output = await memoryTranscriptFramesMayOverlapRange(
+                        () => {
+                          assertRequestCurrent();
+                          const frame = memorySource.read(marker.sessionId);
+                          assertRequestCurrent();
+                          return frame;
+                        },
+                        range,
+                        context.signal,
+                      );
+                    } finally {
+                      memorySource.clear();
+                    }
+                    assertRequestCurrent();
                     break;
                   }
                   case "memory-cache": {

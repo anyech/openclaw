@@ -46,7 +46,11 @@ type Source = {
 export function createIncognitoComputeWorker(
   database: OpenClawAgentDatabase,
   env: NodeJS.ProcessEnv,
-  admit: (stage: "transaction" | "commit", keys: readonly string[]) => void,
+  admit: (
+    stage: "transaction" | "commit",
+    keys: readonly string[],
+    admission?: { unchangedSessionFacts?: true },
+  ) => void,
 ) {
   const sources = new Map<string, Source>();
   let keys: string[] = [];
@@ -242,7 +246,11 @@ export function createIncognitoComputeWorker(
                   claimId: held.claimId,
                   maxRowsPerTable: 512,
                 }).hasMore;
-              admit("commit", keys);
+              admit(
+                "commit",
+                keys,
+                held?.claimId === undefined ? { unchangedSessionFacts: true } : undefined,
+              );
               return more;
             },
           );
