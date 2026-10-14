@@ -77,6 +77,8 @@ describe("stuck session follow-up recovery", () => {
     vi.useFakeTimers({
       toFake: ["Date", "performance", "setTimeout", "clearTimeout", "setInterval", "clearInterval"],
     });
+    // Keep request expiry aligned with the scheduler's maintenance slots.
+    vi.setSystemTime(0);
     setDiagnosticsEnabledForProcess(true);
     startDiagnosticRunActivityTracking();
     const ref = {
