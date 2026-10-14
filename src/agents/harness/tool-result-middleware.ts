@@ -6,6 +6,8 @@ import type {
   AgentToolResultMiddlewareEvent,
   OpenClawAgentToolResult,
 } from "../../plugins/agent-tool-result-middleware-types.js";
+import { getPluginValueInstance } from "../../plugins/plugin-instance-scope.js";
+import { getPluginInstanceGateway } from "../../plugins/registry-lifecycle.js";
 import { createLazyPromiseLoader } from "../../shared/lazy-promise.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import { readEmbeddedMessageDeliveryFact } from "../embedded-agent-message-delivery.js";
@@ -237,6 +239,50 @@ function reconcileDeliveredMessagingFailure(
     : result;
 }
 
+/**
+ * Resolve a retired handler against its original Gateway's current registry.
+ * A replacement contributes the handlers a newly started run would resolve.
+ * Without a current owner, a new publication, or a replacement registration,
+ * the stale handler is retained so the existing fail-closed behavior applies.
+ */
+function resolveCurrentPluginMiddleware(
+  handler: AgentToolResultMiddleware,
+  runtime: AgentToolResultMiddlewareContext["runtime"],
+  expandedReplacements: WeakMap<object, Set<string>>,
+): readonly AgentToolResultMiddleware[] {
+  const instance = getPluginValueInstance(handler);
+  if (!instance?.owner || (!instance.disposing && instance.acceptingCalls)) {
+    return [handler];
+  }
+  const { gatewayOwner, registry } = getPluginInstanceGateway(instance.owner);
+  const successor = gatewayOwner?.current();
+  if (successor === undefined || successor === registry) {
+    return [handler];
+  }
+  const replacements = successor.agentToolResultMiddlewares.filter(
+    (entry) =>
+      entry.pluginId === instance.pluginId &&
+      entry.runtimes.includes(runtime) &&
+      entry.handler !== handler,
+  );
+  if (replacements.length === 0) {
+    return [handler];
+  }
+  // Several stale handlers can belong to one plugin. Expand that plugin's
+  // current registrations once per successor generation, at the first stale
+  // registration's position in the ordered handler list.
+  const expanded = expandedReplacements.get(successor);
+  if (expanded?.has(instance.pluginId)) {
+    return [];
+  }
+  if (expanded) {
+    expanded.add(instance.pluginId);
+  } else {
+    expandedReplacements.set(successor, new Set([instance.pluginId]));
+  }
+  return replacements.map((entry) => entry.handler);
+}
+
 export function createAgentToolResultMiddlewareRunner(
   ctx: AgentToolResultMiddlewareContext,
   handlers?: AgentToolResultMiddleware[],
@@ -252,7 +298,10 @@ export function createAgentToolResultMiddlewareRunner(
     async applyToolResultMiddleware(
       event: AgentToolResultMiddlewareEvent,
     ): Promise<OpenClawAgentToolResult> {
-      const handlersForRun = await (handlers ?? resolvedHandlersLoader.load());
+      const expandedReplacements = new WeakMap<object, Set<string>>();
+      const handlersForRun = (await (handlers ?? resolvedHandlersLoader.load())).flatMap(
+        (handler) => resolveCurrentPluginMiddleware(handler, ctx.runtime, expandedReplacements),
+      );
       if (handlersForRun.length === 0) {
         return event.result;
       }
@@ -272,7 +321,17 @@ export function createAgentToolResultMiddlewareRunner(
         // Loaded middleware follows the SDK's by-reference value contract;
         // only the legacy native content wrapper needs adaptation here.
         let current = normalizeNativeToolResult(event.result);
-        for (const handler of handlersForRun) {
+        const pending = [...handlersForRun];
+        for (let handler = pending.shift(); handler; handler = pending.shift()) {
+          const resolved = resolveCurrentPluginMiddleware(
+            handler,
+            ctx.runtime,
+            expandedReplacements,
+          );
+          if (resolved.length !== 1 || resolved[0] !== handler) {
+            pending.unshift(...resolved);
+            continue;
+          }
           const next = await handler({ ...event, result: current }, ctx);
           current = normalizeNativeToolResult(next?.result ?? current);
         }

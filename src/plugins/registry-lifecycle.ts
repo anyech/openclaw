@@ -52,6 +52,10 @@ type PluginRegistryLifecycleStore = {
     ReadonlyMap<string, Pick<PluginChannelRegistration, "pluginId" | "plugin">>
   >;
   borrowedRecords?: WeakMap<PluginRegistry, WeakSet<PluginRecord>>;
+  releasedInstanceGateways?: WeakMap<
+    PluginInstanceOwner,
+    { gatewayOwner: WeakRef<PluginRegistryGatewayOwner>; registry: WeakRef<PluginRegistry> }
+  >;
 };
 
 const lifecycle = resolveGlobalSingleton<PluginRegistryLifecycleStore>(
@@ -74,6 +78,7 @@ const registryLifetimes = (lifecycle.registryLifetimes ??= new WeakMap());
 const gatewayOwners = (lifecycle.gatewayOwners ??= new WeakMap());
 const gatewayChannels = (lifecycle.gatewayChannels ??= new WeakMap());
 const borrowedRecords = (lifecycle.borrowedRecords ??= new WeakMap());
+const releasedInstanceGateways = (lifecycle.releasedInstanceGateways ??= new WeakMap());
 const loadRegistryDisposer = (lifecycle.loadRegistryDisposer ??= createLazyRuntimeNamedExport(
   () => import("./runtime.js"),
   "disposePluginRegistryInstances",
@@ -143,7 +148,31 @@ export function releasePluginInstanceRegistry(owner: PluginInstanceOwner): void 
   if (!owner.revoked) {
     throw new Error("Cannot release an active plugin instance registry");
   }
+  // Retired work still resolves successors through the original Gateway. Keep
+  // only weak links so a disposed instance never retains a Gateway or registry.
+  const gatewayOwner = owner.registry && getPluginRegistryGatewayOwner(owner.registry);
+  if (owner.registry && gatewayOwner) {
+    releasedInstanceGateways.set(owner, {
+      gatewayOwner: new WeakRef(gatewayOwner),
+      registry: new WeakRef(owner.registry),
+    });
+  }
   owner.registry = undefined;
+}
+
+/** Gateway owner and publication of a plugin instance, surviving registry release. */
+export function getPluginInstanceGateway(owner: PluginInstanceOwner): {
+  gatewayOwner?: PluginRegistryGatewayOwner;
+  registry?: PluginRegistry;
+} {
+  if (owner.registry) {
+    return {
+      gatewayOwner: getPluginRegistryGatewayOwner(owner.registry),
+      registry: owner.registry,
+    };
+  }
+  const released = releasedInstanceGateways.get(owner);
+  return { gatewayOwner: released?.gatewayOwner.deref(), registry: released?.registry.deref() };
 }
 
 /** Prepared views inherit the publication snapshot, not a successor generation. */

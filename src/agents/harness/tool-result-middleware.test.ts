@@ -1,8 +1,153 @@
 // Verifies trusted middleware composition, native content adaptation, and failure presentation.
 import { describe, expect, it } from "vitest";
+import type { AgentToolResultMiddleware } from "../../plugins/agent-tool-result-middleware-types.js";
+import { PluginInstance } from "../../plugins/plugin-instance.js";
+import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
+import {
+  createPluginRegistryOwner,
+  resetPluginRuntimeStateForTest,
+  setActivePluginRegistry,
+} from "../../plugins/runtime.js";
+import { createPluginRecord } from "../../plugins/status.test-fixtures.js";
 import { createAgentToolResultMiddlewareRunner } from "./tool-result-middleware.js";
 
+function createMiddlewareGeneration(
+  pluginId: string,
+  suffixes: string[],
+  calls: string[],
+  createGatewayOwner = true,
+) {
+  const record = createPluginRecord({ id: pluginId });
+  const registry = createEmptyPluginRegistry();
+  registry.plugins.push(record);
+  setActivePluginRegistry(registry);
+  const gateway = createGatewayOwner ? createPluginRegistryOwner(registry) : undefined;
+  const instance = new PluginInstance(record.id, { record, registry });
+  const handlers = suffixes.map((suffix) => {
+    const handler = instance.wrap<AgentToolResultMiddleware>((event) => {
+      calls.push(`${suffix}:${event.toolCallId}`);
+      const firstContent = event.result.content[0];
+      const text = firstContent?.type === "text" ? firstContent.text : "";
+      return {
+        result: {
+          ...event.result,
+          content: [{ type: "text", text: `${text}:${suffix}` }],
+        },
+      };
+    });
+    registry.agentToolResultMiddlewares.push({
+      pluginId: record.id,
+      source: "test",
+      rawHandler: handler,
+      handler,
+      runtimes: ["openclaw"],
+    });
+    return handler;
+  });
+  return { registry, gateway, instance, handlers };
+}
+
 describe("createAgentToolResultMiddlewareRunner", () => {
+  it("hands each replacement handler over once and in registration order", async () => {
+    const calls: string[] = [];
+    const original = createMiddlewareGeneration(
+      "replaced-between-calls",
+      ["old-1", "old-2"],
+      calls,
+    );
+    const runner = createAgentToolResultMiddlewareRunner(
+      { runtime: "openclaw" },
+      original.handlers,
+    );
+    const event = {
+      toolCallId: "call-1",
+      toolName: "exec",
+      args: {},
+      result: { content: [{ type: "text" as const, text: "exit 0" }], details: {} },
+    };
+
+    try {
+      expect((await runner.applyToolResultMiddleware(event)).content).toEqual([
+        { type: "text", text: "exit 0:old-1:old-2" },
+      ]);
+      const replacement = createMiddlewareGeneration(
+        "replaced-between-calls",
+        ["new-1", "new-2"],
+        calls,
+        false,
+      );
+      original.gateway?.publish(replacement.registry);
+      await original.instance.dispose();
+
+      const afterReload = await runner.applyToolResultMiddleware({
+        ...event,
+        toolCallId: "call-2",
+      });
+      expect(afterReload.content).toEqual([{ type: "text", text: "exit 0:new-1:new-2" }]);
+      expect(calls).toEqual(["old-1:call-1", "old-2:call-1", "new-1:call-2", "new-2:call-2"]);
+    } finally {
+      resetPluginRuntimeStateForTest();
+    }
+  });
+
+  it("expands a pending replacement once after an earlier middleware awaits", async () => {
+    const calls: string[] = [];
+    const original = createMiddlewareGeneration(
+      "replaced-while-pending",
+      ["old-1", "old-2"],
+      calls,
+    );
+    let signalEntered = () => {};
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let unblock = () => {};
+    const blocked = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const earlier: AgentToolResultMiddleware = async (event) => {
+      signalEntered();
+      await blocked;
+      const firstContent = event.result.content[0];
+      const text = firstContent?.type === "text" ? firstContent.text : "";
+      return {
+        result: { ...event.result, content: [{ type: "text", text: `${text}:earlier` }] },
+      };
+    };
+    const runner = createAgentToolResultMiddlewareRunner({ runtime: "openclaw" }, [
+      earlier,
+      ...original.handlers,
+    ]);
+    const event = {
+      toolCallId: "pending-call",
+      toolName: "exec",
+      args: {},
+      result: { content: [{ type: "text" as const, text: "exit 0" }], details: {} },
+    };
+    const applied = runner.applyToolResultMiddleware(event);
+
+    try {
+      await entered;
+      const replacement = createMiddlewareGeneration(
+        "replaced-while-pending",
+        ["new-1", "new-2"],
+        calls,
+        false,
+      );
+      original.gateway?.publish(replacement.registry);
+      await original.instance.dispose();
+      unblock();
+
+      const result = await applied;
+      expect(result.content).toEqual([{ type: "text", text: "exit 0:earlier:new-1:new-2" }]);
+      expect(calls).toEqual(["new-1:pending-call", "new-2:pending-call"]);
+    } finally {
+      unblock();
+      await applied;
+      resetPluginRuntimeStateForTest();
+    }
+  });
+
   it("delivers tool result unchanged when no middleware is registered", async () => {
     const client: Record<string, unknown> = { type: "fake-channel-client" };
     const cyclicDetails: Record<string, unknown> = {

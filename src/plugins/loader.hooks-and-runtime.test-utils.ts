@@ -1327,27 +1327,41 @@ ${channelPluginSource({
   });
 
   it.each([
-    { successor: "replaced", replaced: true },
-    {
-      successor: "removed and its Gateway is closing",
-      closeGatewayA: true,
-    },
+    { successor: "replaced", replaced: true, reapplied: true },
+    { successor: "replaced but disposed before publication", replaced: true, disposeFirst: true },
+    { successor: "replaced while Gateway B is process-active", replaced: true, gatewayB: true },
+    { successor: "removed", reapplied: false },
+    { successor: "removed and its Gateway is closing", closeGatewayA: true },
     {
       // A published build shares this process state but never links its registries.
       successor: "removed from a registry a published build left unlinked",
       unlinked: true,
     },
   ])(
-    "rejects retired middleware when its plugin was $successor",
-    async ({ successor, replaced, closeGatewayA, unlinked }) => {
+    "handles retired middleware when its plugin was $successor",
+    async ({ successor, replaced, gatewayB, closeGatewayA, unlinked, disposeFirst, reapplied }) => {
       useNoBundledPlugins();
       const pluginId = `tool-result-middleware-${successor}`;
+      const registration = ["first", "second"]
+        .map(
+          (suffix) => `
+            api.registerAgentToolResultMiddleware((event) => {
+              const first = event.result.content[0];
+              const text = first?.type === "text" ? first.text : "";
+              return {
+                result: {
+                  ...event.result,
+                  content: [{ type: "text", text: text + ":" + ${JSON.stringify(suffix)} }],
+                },
+              };
+            }, { runtimes: ["openclaw"] });
+          `,
+        )
+        .join("\n");
       const plugin = writePlugin({
         id: pluginId,
         filename: `${pluginId}.cjs`,
-        registration: `api.registerAgentToolResultMiddleware((event) => ({
-          result: { ...event.result, content: [{ type: "text", text: "compacted" }] },
-        }), { runtimes: ["openclaw"] });`,
+        registration,
       });
       updatePluginManifest(plugin, { contracts: { agentToolResultMiddleware: ["openclaw"] } });
       const registry = loadRegistryFromSinglePlugin({
@@ -1356,16 +1370,19 @@ ${channelPluginSource({
       });
       const record = registry.plugins.find((entry) => entry.id === pluginId);
       const instance = record && getPluginInstance(record);
-      const entry = registry.agentToolResultMiddlewares[0];
-      if (!instance || !entry) {
-        throw new Error("expected a loaded middleware plugin instance");
+      const entries = registry.agentToolResultMiddlewares.filter(
+        (entry) => entry.pluginId === pluginId,
+      );
+      if (!instance || entries.length !== 2) {
+        throw new Error("expected two loaded middleware registrations");
       }
       setActivePluginRegistry(registry);
       const gatewayA = unlinked ? undefined : createPluginRegistryOwner(registry);
       // A run resolves its middleware once and keeps that list.
-      const runner = createAgentToolResultMiddlewareRunner({ runtime: "openclaw" }, [
-        entry.handler,
-      ]);
+      const runner = createAgentToolResultMiddlewareRunner(
+        { runtime: "openclaw" },
+        entries.map((entry) => entry.handler),
+      );
       const event = {
         toolCallId: "call-1",
         toolName: "exec",
@@ -1373,25 +1390,43 @@ ${channelPluginSource({
         result: { content: [{ type: "text" as const, text: "exit 0" }], details: {} },
       };
       expect((await runner.applyToolResultMiddleware(event)).content).toEqual([
-        { type: "text", text: "compacted" },
+        { type: "text", text: "exit 0:first:second" },
       ]);
 
-      const next = createEmptyPluginRegistry();
-      if (replaced) {
-        next.plugins.push({ ...record });
+      // A replacement reloads the same plugin into a new instance with its own middleware.
+      const next = replaced
+        ? loadRegistryFromSinglePlugin({ plugin, pluginConfig: { allow: [pluginId] } })
+        : createEmptyPluginRegistry();
+      // The real reload flow disposes previous instances before publishing.
+      if (disposeFirst) {
+        await instance.dispose();
       }
       setActivePluginRegistry(next);
-      gatewayA?.publish(next);
+      if (!disposeFirst) {
+        gatewayA?.publish(next);
+      }
+      if (gatewayB) {
+        // Gateway B becomes process-active; Gateway A no longer owns new work.
+        const other = createEmptyPluginRegistry();
+        setActivePluginRegistry(other);
+        createPluginRegistryOwner(other);
+      }
       if (closeGatewayA) {
         await gatewayA?.close();
       }
-      await instance.dispose();
-      // A retired callback cannot run against the later result.
-      const details: Record<string, unknown> = { format: () => "exit 0" };
-      details.self = details;
-      const raw = { content: [{ type: "text" as const, text: "exit 0" }], details };
+      if (!disposeFirst) {
+        await instance.dispose();
+      }
+      const raw = { content: [{ type: "text" as const, text: "exit 0" }], details: {} };
       const result = await runner.applyToolResultMiddleware({ ...event, result: raw });
-      expect(result.details).toEqual({ status: "error", middlewareError: true });
+      if (reapplied) {
+        // This ordered output proves both successor registrations run once after reload.
+        expect(result.content).toEqual([{ type: "text", text: "exit 0:first:second" }]);
+        expect(result.details).not.toEqual({ status: "error", middlewareError: true });
+      } else {
+        // Without a current replacement, the stale handler keeps failing closed.
+        expect(result.details).toEqual({ status: "error", middlewareError: true });
+      }
     },
   );
 
