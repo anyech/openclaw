@@ -1,9 +1,14 @@
 import fs from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { trackSqliteStatementExecutions } from "../../test/helpers/sqlite-statement-execution-counter.js";
+import {
+  observeHostDataSql,
+  trackSqliteStatementExecutions,
+} from "../../test/helpers/sqlite-statement-execution-counter.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { OpenClawStateExternalOwnershipError } from "../infra/sqlite-lifecycle-errors.js";
+import { runSqliteReadOperationSync } from "../infra/sqlite-schema-facts.js";
+import { classifySqliteMutation } from "../infra/sqlite-schema-mutation.js";
 import { extractSqliteTableSchema } from "../infra/sqlite-schema-sql.js";
 import * as operationAdmission from "../infra/sqlite-worker-operation-admission.js";
 import {
@@ -106,6 +111,73 @@ function launchIds(database: ReturnType<typeof openOpenClawStateDatabase>["db"])
 }
 
 describe("node worker launch admitted schema", () => {
+  it("claims and starts a launch on initialized tables without revoking schema authority", () => {
+    const env = { OPENCLAW_STATE_DIR: tempDirs.make("node-worker-launch-warm-schema-") };
+    const opened = openOpenClawStateDatabase({ env });
+    const tables = [
+      "node_worker_launches",
+      "node_worker_launch_boots",
+      "node_worker_launch_containers",
+      "node_worker_launch_cleanup",
+      "node_worker_launch_process_scopes",
+    ];
+    opened.db.exec(
+      tables
+        .map((table) =>
+          extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, table, {
+            endMarker:
+              table === "node_worker_launches"
+                ? "\n  WHERE completed_at_ms IS NOT NULL;"
+                : undefined,
+          }),
+        )
+        .join("\n"),
+    );
+    const admission = vi
+      .spyOn(operationAdmission, "requestSqliteWorkerOperationAdmission")
+      .mockImplementation(() => {});
+    const sql = observeHostDataSql();
+    try {
+      const kernel = new NodeWorkerLaunchKernel({ database: opened, env });
+      const supervisor = requireNodeWorkerProcessIdentity(process.pid);
+      const claim = {
+        launchId: "warm-launch",
+        planHash: "a".repeat(64),
+        gatewayNamespace: "gateway-1",
+        environmentId: "environment-1",
+        sessionId: "session-1",
+        ownerEpoch: 3,
+        placementGeneration: 4,
+        runId: "run-1",
+      };
+      expect(
+        kernel.claim(claim, supervisor, 2, NOW_MS, undefined, undefined, "boot-1"),
+      ).toMatchObject({ action: "start", receipt: { state: "pending", bootId: "boot-1" } });
+      const running = kernel.markRunning({
+        ...claim,
+        supervisor,
+        worker: supervisor,
+        cleanupMode: "linux-subreaper",
+        container: { engine: "docker", containerId: "b".repeat(64), engineTarget: "c".repeat(64) },
+        nowMs: NOW_MS,
+      });
+      expect(running).toMatchObject({
+        state: "running",
+        bootId: "boot-1",
+        workerCleanupMode: "linux-subreaper",
+        workerDescendantsReaped: false,
+        container: { engine: "docker", containerId: "b".repeat(64) },
+      });
+      expect(kernel.get(claim.launchId)).toEqual(running);
+      expect(
+        sql.queries.filter((query) => classifySqliteMutation(query, "batch").mainSchemaChange),
+      ).toEqual([]);
+    } finally {
+      sql.restore();
+      admission.mockRestore();
+    }
+  });
+
   function kernelFixture() {
     const env = { OPENCLAW_STATE_DIR: tempDirs.make("node-worker-launch-schema-") };
     const opened = openOpenClawStateDatabase({ env });
@@ -118,14 +190,16 @@ describe("node worker launch admitted schema", () => {
     return { ...opened, opened, env, kernel, admission };
   }
 
-  it("shares admitted facts across warm launch joins without suppressing operation freshness", () => {
+  it("shares admitted facts across warm launch joins without freshness probes", () => {
     const { db, kernel, admission } = kernelFixture();
     try {
       const pending = kernel.get("schema-launch")!;
       const measure = (receipt: typeof pending) => {
         // Warm outside the transaction after lazy DDL invalidates transactional facts.
         expect(kernel.get(receipt.launchId)).toEqual(receipt);
-        expect(readNodeWorkerLaunchReceipt(db, receipt.launchId)).toEqual(receipt);
+        expect(
+          runSqliteReadOperationSync(db, () => readNodeWorkerLaunchReceipt(db, receipt.launchId)),
+        ).toEqual(receipt);
         const reads = trackSqliteStatementExecutions(
           db,
           ["schema", "dataVersion", "launch"],
@@ -133,7 +207,7 @@ describe("node worker launch admitted schema", () => {
             if (/sqlite_(?:schema|master)/iu.test(sql)) {
               return "schema";
             }
-            if (/^PRAGMA data_version$/iu.test(sql)) {
+            if (/^PRAGMA data_version$|FROM main\.pragma_data_version\(\)\s*$/iu.test(sql)) {
               return "dataVersion";
             }
             return sql.startsWith("select ") && sql.includes('from "node_worker_launches"')
@@ -145,10 +219,13 @@ describe("node worker launch admitted schema", () => {
           for (let index = 0; index < 3; index += 1) {
             expect(kernel.get(receipt.launchId)).toEqual(receipt);
             expect(kernel.listNonterminal()).toEqual([receipt]);
-            expect(readNodeWorkerLaunchReceipt(db, receipt.launchId)).toEqual(receipt);
+            expect(
+              runSqliteReadOperationSync(db, () =>
+                readNodeWorkerLaunchReceipt(db, receipt.launchId),
+              ),
+            ).toEqual(receipt);
           }
-          // Each launch read probes freshness once, not once per optional companion join.
-          expect(reads.counts).toEqual({ schema: 0, dataVersion: 9, launch: 9 });
+          expect(reads.counts).toEqual({ schema: 0, dataVersion: 0, launch: 9 });
           expect(reads.rowCounts.launch).toBe(9);
         } finally {
           reads.restore();
@@ -206,7 +283,7 @@ describe("node worker launch admitted schema", () => {
     }
   });
 
-  it("observes foreign companion commits after the current snapshot without inventing certificates", () => {
+  it("observes foreign companion row commits after the current snapshot without inventing certificates", () => {
     const { db, path, kernel, admission } = kernelFixture();
     // Native connection bypasses in-process schema publications, like a separate worker.
     const foreign = new (requireNodeSqlite().DatabaseSync)(path);
@@ -219,12 +296,12 @@ describe("node worker launch admitted schema", () => {
         nowMs: NOW_MS,
       });
       expect(legacy.workerDescendantsReaped).toBeUndefined();
+      db.exec(
+        extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, "node_worker_launch_process_scopes"),
+      );
       db.exec("BEGIN");
       try {
         expect(readNodeWorkerLaunchReceipt(db, legacy.launchId)).toEqual(legacy);
-        foreign.exec(
-          extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, "node_worker_launch_process_scopes"),
-        );
         foreign
           .prepare(
             "INSERT INTO node_worker_launch_process_scopes (launch_id, scope_kind, descendants_reaped) VALUES (?, 'linux-subreaper', NULL)",

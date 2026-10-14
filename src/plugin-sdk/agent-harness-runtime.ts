@@ -47,6 +47,14 @@ import { resolveExecModePolicy } from "../infra/exec-approvals-core.js";
 import { maxAsk, minSecurity } from "../infra/exec-approvals-policy.js";
 import type { ImageContent } from "../llm/types.js";
 import type { PromptImageOrderEntry } from "../media/prompt-image-order.js";
+import { warnPluginSdkDeprecation } from "../plugins/sdk-deprecation.js";
+
+export type {
+  AgentExecutorBinding,
+  AgentExecutorContext,
+  AgentExecutorController,
+} from "../plugins/agent-executor-controller.types.js";
+export { resolveAgentExecutorController } from "../plugins/agent-executor-controller.js";
 
 export { projectAgentActivityItem } from "../agents/agent-activity-presentation.js";
 export { projectAgentToolActivity } from "../infra/agent-activity-events.js";
@@ -73,6 +81,11 @@ export function buildWatchedSessionsHarnessContext(params: {
   toolNames: Iterable<string>;
   capabilityToolNames?: Iterable<string>;
 }): string | undefined {
+  warnPluginSdkDeprecation({
+    family: "watched-sessions-sync-harness-context",
+    method: "buildWatchedSessionsHarnessContext",
+    replacement: "await prepareWatchedSessionsHarnessContext() with a host-bound assertCurrent",
+  });
   const lines = buildWatchedSessionsPromptLines(
     prepareWatchedSessionsPrompt({ enabled: true, ...params }),
   );
@@ -133,6 +146,7 @@ export type {
 } from "../agents/harness/types.js";
 export {
   AgentHarnessPreflightError,
+  AgentHarnessSessionCleanupError,
   AgentHarnessSessionSupersededError,
 } from "../agents/harness/errors.js";
 export { projectSettledTurnFinalizationAttemptResult } from "../agents/harness/settled-turn-finalization-result.js";
@@ -270,13 +284,13 @@ export {
   extractMessagingToolSourceReplyPayload,
   isDeliveredMessagingToolSendToCurrentSource,
 } from "../agents/embedded-agent-messaging-extraction.js";
+export { captureToolAuthoredSourceReply } from "../agents/embedded-agent-tool-authored-source-reply.js";
 export {
   extractToolResultMediaArtifact,
   filterToolResultMediaUrls,
 } from "../agents/embedded-agent-tool-media.js";
 export {
   extractToolErrorMessage,
-  sanitizeToolArgs,
   sanitizeToolResult,
 } from "../agents/embedded-agent-tool-results.js";
 export {
@@ -290,7 +304,7 @@ export { readToolOperatorHint } from "../agents/tool-operator-hint.js";
 export { normalizeUsage } from "../agents/usage.js";
 export { resolveAgentDir, resolveDefaultAgentDir } from "../agents/agent-scope.js";
 export { resolveSessionAgentIds } from "./agent-scope-runtime.js";
-export { resolveModelAuthMode } from "../agents/model-auth.js";
+export { resolveModelAuthMode, resolveModelAuthModeAsync } from "../agents/model-auth.js";
 export { supportsModelTools } from "../agents/model-tool-support.js";
 export { isAgentToolReplaySafe } from "../agents/tool-replay-safety.js";
 export { getChannelAgentToolMeta } from "../agents/channel-tool-metadata.js";
@@ -619,6 +633,7 @@ export {
 export {
   awaitAgentEndSideEffects,
   runAgentEndSideEffects,
+  runAgentEndSideEffectsAsync,
 } from "../agents/harness/agent-end-side-effects.js";
 export { buildEmbeddedForegroundPromptContext } from "../agents/embedded-agent-runner/run/agent-end-context.js";
 export type { EmbeddedForegroundPromptContext } from "../agents/embedded-agent-runner/run/params.js";

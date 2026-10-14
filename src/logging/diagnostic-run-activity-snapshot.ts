@@ -61,23 +61,25 @@ export function buildDiagnosticSessionActivitySnapshot(
   const currentOwner = resolveCurrentDiagnosticRun(activity.activeEmbeddedRuns.values());
   const currentOwnerRunId = currentOwner?.runId;
   let activeCoreModelCallCount = 0;
-  for (const calls of activity.activeCoreModelCalls.values()) {
-    activeCoreModelCallCount += calls.size;
-  }
-  let activeModelCallRequestTimeoutMs = 0;
+  let activeModelCallRequestTimeoutMs: number | undefined;
   let activeModelCallRecoveryDeadlineAtMs: number | undefined;
-  if (currentOwner?.generation !== undefined) {
-    for (const call of activity.activeCoreModelCalls.get(currentOwner.generation)?.values() ?? []) {
-      activeModelCallRequestTimeoutMs = Math.max(
-        activeModelCallRequestTimeoutMs,
-        call.requestTimeoutMs ?? 0,
-      );
-      if (
-        call.deadlineAtMs !== undefined &&
-        (activeModelCallRecoveryDeadlineAtMs === undefined ||
-          call.deadlineAtMs > activeModelCallRecoveryDeadlineAtMs)
-      ) {
-        activeModelCallRecoveryDeadlineAtMs = call.deadlineAtMs;
+  for (const [generation, calls] of activity.activeCoreModelCalls) {
+    activeCoreModelCallCount += calls.size;
+    if (generation !== currentOwner?.generation) {
+      continue;
+    }
+    for (const call of calls.values()) {
+      if (call.requestTimeoutMs !== undefined) {
+        activeModelCallRequestTimeoutMs = Math.max(
+          activeModelCallRequestTimeoutMs ?? 0,
+          call.requestTimeoutMs,
+        );
+      }
+      if (call.deadlineAtMs !== undefined) {
+        activeModelCallRecoveryDeadlineAtMs = Math.max(
+          activeModelCallRecoveryDeadlineAtMs ?? 0,
+          call.deadlineAtMs,
+        );
       }
     }
   }
@@ -127,8 +129,7 @@ export function buildDiagnosticSessionActivitySnapshot(
       currentOwnerRunId,
       now,
     ),
-    activeModelCallRequestTimeoutMs:
-      activeModelCallRequestTimeoutMs > 0 ? activeModelCallRequestTimeoutMs : undefined,
+    activeModelCallRequestTimeoutMs,
     activeModelCallRecoveryDeadlineAtMs,
   };
 }

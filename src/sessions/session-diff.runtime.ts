@@ -12,12 +12,7 @@ import { runGit, runGitBuffered } from "../agents/worktrees/git.js";
 import type { SessionDiffBaseline } from "../config/sessions/types.js";
 import { GIT_TIMEOUT_MS } from "../infra/git-exec.js";
 import type { GitCheckoutDiffInput, GitReadOperations } from "../infra/git-read-operations.js";
-import {
-  parseDiffInventoryZ,
-  parseNameStatusZ,
-  parseNumstatZ,
-  splitPatchByFile,
-} from "./session-diff-parser.js";
+import { parseDiffInventoryZ, parseNameStatusZ, splitPatchByFile } from "./session-diff-parser.js";
 import {
   loadSessionDiffBranchMetadata,
   resolveSessionDiffBase,
@@ -232,20 +227,10 @@ async function collectTrackedFiles(
 ): Promise<{ files: SessionDiffFile[]; truncated: boolean }> {
   const diffArgs = (options: string[]) => ["diff", "-M", ...options, ...revisions, "--"];
   const inventoryText = await gitOut(root, diffArgs(["--raw", "--numstat", "--no-color", "-z"]));
-  let inventory: ReturnType<typeof parseDiffInventoryZ>;
-  if (inventoryText !== null) {
-    inventory = parseDiffInventoryZ(inventoryText);
-  } else {
-    // Preserve filename-only results when Git cannot compute line counts.
-    const nameStatus = await gitOut(root, diffArgs(["--name-status", "-z"]));
-    const entries = parseNameStatusZ(nameStatus ?? "");
-    if (entries.length === 0) {
-      return { files: [], truncated: false };
-    }
-    const numstatText = (await gitOut(root, diffArgs(["--numstat", "-z"]))) ?? "";
-    inventory = { entries, numstat: parseNumstatZ(numstatText) };
+  if (inventoryText === null) {
+    throw new Error("Unable to read tracked Git changes");
   }
-  const { entries, numstat } = inventory;
+  const { entries, numstat } = parseDiffInventoryZ(inventoryText);
   if (entries.length === 0) {
     return { files: [], truncated: false };
   }
@@ -401,6 +386,7 @@ export async function collectCheckoutDiff(
     ? await applySessionDiffBaseline({
         baseline: params.baseline,
         diff,
+        scope,
         sessionId: params.sessionId,
       })
     : diff;
@@ -492,9 +478,9 @@ async function gitOutForBaseline(cwd: string, args: string[]): Promise<string | 
   return result.stdout.toString("utf8");
 }
 
-export async function collectCheckoutDiffBaseline(params: {
+async function collectBaselineCandidates(params: {
   cwd: string;
-}): Promise<GitReadOperations["checkout.baseline"]["output"]> {
+}): Promise<{ candidates: BaselineCandidate[]; root: string; truncated: boolean } | undefined> {
   const checkout = await loadCheckoutRevision(params.cwd);
   if (!checkout) {
     return undefined;
@@ -503,23 +489,14 @@ export async function collectCheckoutDiffBaseline(params: {
   const baseInfo = head
     ? await resolveSessionDiffBase({ branch, gitOut, head, root })
     : await resolveSessionDiffEmptyTree(root, objectFormat);
-  const [trackedResult, untrackedResult] = await Promise.allSettled([
+  const [trackedText, untrackedText] = await Promise.all([
     baseInfo
       ? gitOutForBaseline(root, ["diff", "-M", baseInfo.base, "--name-status", "-z"])
       : Promise.resolve(""),
     gitOutForBaseline(root, ["ls-files", "--others", "--exclude-standard", "-z"]),
   ]);
-  // Join both command lifetimes before returning a failure to the capture owner.
-  if (trackedResult.status === "rejected") {
-    throw trackedResult.reason;
-  }
-  if (untrackedResult.status === "rejected") {
-    throw untrackedResult.reason;
-  }
-  const trackedText = trackedResult.value;
-  const untrackedText = untrackedResult.value;
   if (trackedText === null || untrackedText === null) {
-    return { version: 1, root, files: [], truncated: true };
+    return { root, candidates: [], truncated: true };
   }
   const tracked = parseNameStatusZ(trackedText);
   const untrackedPaths = untrackedText.split("\0").filter(Boolean);
@@ -531,16 +508,26 @@ export async function collectCheckoutDiffBaseline(params: {
       untracked: true,
     })),
   ].toSorted((left, right) => left.path.localeCompare(right.path));
-  const fingerprinted = await fingerprintBaselineCandidates({ candidates, root });
+  return {
+    root,
+    candidates,
+    truncated: tracked.length > MAX_FILES || untrackedPaths.length > MAX_UNTRACKED_FILES,
+  };
+}
+
+export async function collectCheckoutDiffBaseline(params: {
+  cwd: string;
+}): Promise<GitReadOperations["checkout.baseline"]["output"]> {
+  const collected = await collectBaselineCandidates(params);
+  if (!collected) {
+    return undefined;
+  }
+  const fingerprinted = await fingerprintBaselineCandidates(collected);
   return {
     version: 1,
-    root,
+    root: collected.root,
     files: fingerprinted.files,
-    ...(tracked.length > MAX_FILES ||
-    untrackedPaths.length > MAX_UNTRACKED_FILES ||
-    fingerprinted.truncated
-      ? { truncated: true }
-      : {}),
+    ...(collected.truncated || fingerprinted.truncated ? { truncated: true } : {}),
   };
 }
 
@@ -571,6 +558,7 @@ async function fingerprintBaselineCandidates(params: {
 async function applySessionDiffBaseline(params: {
   baseline: SessionDiffBaseline | undefined;
   diff: CheckoutDiffResult;
+  scope: NonNullable<GitCheckoutDiffInput["scope"]>;
   sessionId: string;
 }): Promise<CheckoutDiffResult> {
   const { baseline, diff } = params;
@@ -583,10 +571,17 @@ async function applySessionDiffBaseline(params: {
     return diff;
   }
   const fingerprints = new Map(baseline.files.map((file) => [file.path, file.fingerprint]));
+  const candidates =
+    params.scope === "uncommitted"
+      ? ((await collectBaselineCandidates({ cwd: diff.root }))?.candidates ?? [])
+      : diff.files;
+  const visiblePaths = new Set(diff.files.map((file) => file.path));
   // New paths cannot match the baseline; hashing them can exhaust the budget
   // before an unchanged pre-session file is compared.
   const current = await fingerprintBaselineCandidates({
-    candidates: diff.files.filter((file) => fingerprints.has(file.path)),
+    candidates: candidates.filter(
+      (file) => fingerprints.has(file.path) && visiblePaths.has(file.path),
+    ),
     root: diff.root,
   });
   const currentFingerprints = new Map(current.files.map((file) => [file.path, file.fingerprint]));

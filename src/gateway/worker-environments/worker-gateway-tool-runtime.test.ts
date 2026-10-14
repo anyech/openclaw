@@ -12,6 +12,7 @@ import { WORKER_PROTOCOL_MAX_PAYLOAD_BYTES } from "../../../packages/gateway-pro
 import { bindAgentToolExecutionLocation } from "../../agents/agent-tool-metadata.js";
 import { createToolSurfacePresentationForTest } from "../../agents/tool-surface-plan.test-support.js";
 import type { AnyAgentTool } from "../../agents/tools/common.js";
+import { createSessionsYieldTool } from "../../agents/tools/sessions-yield-tool.js";
 import { getPluginToolMeta, setPluginToolMeta } from "../../plugins/tool-metadata.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
@@ -103,6 +104,32 @@ function request(
 }
 
 describe("worker Gateway tool runtime", () => {
+  it("prepares deferred discovery guidance with the model tool projection", async () => {
+    const { runtime } = fixture([], async () => ({
+      tools: [tool("web_fetch")],
+      policy,
+      presentation: createToolSurfacePresentationForTest({
+        tools: { codeMode: false, toolSearch: { enabled: true, mode: "directory" } },
+      }),
+    }));
+    try {
+      const projection = await runtime.getPromptProjection(identity);
+      expect(projection.tools.map(({ name }) => name)).toEqual([
+        "tool_search",
+        "tool_describe",
+        "dispatch_action",
+      ]);
+      expect(projection.toolSchemaDirectoryPrompt).toContain(
+        "Deferred names are not directly callable.",
+      );
+      expect(projection.toolSchemaDirectoryPrompt).not.toContain(
+        "Call a unique deferred tool name directly",
+      );
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("issues one finite surface and invokes only an issued Gateway handle with valid arguments", async () => {
     const execute = vi.fn(async () => success);
     const remote = tool("remote", execute);
@@ -153,6 +180,14 @@ describe("worker Gateway tool runtime", () => {
     expect(execute).not.toHaveBeenCalled();
     await expect(runtime.invoke(identity, invocation, sink)).resolves.toEqual(success);
     expect(execute).toHaveBeenCalledTimes(1);
+    await runtime.close();
+  });
+
+  it("issues sessions_yield with its synchronous flag so worker turns can start", async () => {
+    const { runtime } = fixture([createSessionsYieldTool({ sessionId: "session" })]);
+    const surface = await runtime.getSurface(identity);
+    expect(Value.Check(WorkerToolSurfaceSchema, surface)).toBe(true);
+    expect(surface.tools[0]?.definition).toMatchObject({ name: "sessions_yield", async: false });
     await runtime.close();
   });
 
@@ -409,6 +444,27 @@ describe("worker Gateway tool runtime", () => {
       await runtime.close();
     },
   );
+
+  it("preserves error text through worker tool execution", async () => {
+    const message = "API_TOKEN = computeToken(); Authorization: Bearer sk-fixture1234567890";
+    const execute = vi.fn(async () => {
+      throw new Error(message);
+    });
+    const { runtime } = fixture([tool("remote", execute)]);
+    try {
+      const surface = await runtime.getSurface(identity);
+      const result = await runtime.invoke(identity, request(surface), sink);
+      expect(result).toEqual({
+        content: [
+          { type: "text", text: JSON.stringify({ status: "error", error: message }, null, 2) },
+        ],
+        details: { status: "error", error: message },
+      });
+      expect(execute).toHaveBeenCalledOnce();
+    } finally {
+      await runtime.close();
+    }
+  });
 
   it.each([false, true])("bounds result and update control bytes with images=%s", async (image) => {
     const oversized = {

@@ -1,3 +1,4 @@
+import type { SessionEventSourcePolicy } from "../auto-reply/reply/session-event-contract.js";
 import type { ThinkLevel } from "../auto-reply/thinking.shared.js";
 import type { ModelCompatConfig } from "../config/types.models.js";
 import type { GroupToolPolicyConfig } from "../config/types.tools.js";
@@ -55,6 +56,8 @@ export type OpenClawCodingToolsOptions = {
   trace?: DiagnosticTraceContext;
   /** What initiated this run (for trigger-specific tool restrictions). */
   trigger?: string;
+  /** Heartbeat-transported turn that continues a conversation (its own command completion). */
+  continuesConversation?: boolean;
   /** Stable cron job identifier populated for cron-triggered runs. */
   jobId?: string;
   /** Relative workspace path that memory-triggered writes may append to. */
@@ -141,3 +144,17 @@ export type OpenClawCodingToolsOptions = {
   AgentRunClientContext &
   AgentRunMessageContext &
   AgentRunChannelContext;
+
+export type InternalCodingToolsOptions = OpenClawCodingToolsOptions & {
+  awaitSessionDiffBaseline?: () => Promise<void>;
+  /** The host owns continuation policy when this factory builds only part of its tool surface. */
+  sessionEventSourcePolicy?: SessionEventSourcePolicy;
+};
+
+export type PluginCodingToolsOptions = Omit<
+  OpenClawCodingToolsOptions,
+  | "sessionReadScopeKey"
+  | "onProgressCardPlanSaved"
+  | "authProfileStoreSource"
+  | "onWebSearchConfiguration"
+>;

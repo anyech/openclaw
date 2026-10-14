@@ -13,10 +13,10 @@ import { parse } from "acorn";
 import type { CodeModeExecutorId } from "../../src/agents/code-mode-executor-types.js";
 import { resolveCodeModeConfig } from "../../src/agents/code-mode-runtime.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
-import { mergeDeep } from "../../src/infra/deep-merge.js";
 import { readResponseWithLimit } from "../../src/infra/http-response-body.js";
 import type { ManagedRun } from "../../src/process/supervisor/types.js";
 import type { CodeModeMatrixCellResult, RunCellParams } from "../code-mode-model-matrix.ts";
+import { createGatewayMatrixConfig } from "./code-mode-matrix-config.ts";
 import {
   createGatewayMatrixFixture,
   createGatewayMatrixPluginManifest,
@@ -32,7 +32,6 @@ import {
 import type { MatrixPerformanceFixture } from "./code-mode-matrix-performance-types.ts";
 import {
   classifyCodeModeMatrixProviderFailure,
-  matrixModelConfig,
   matrixProviderEnv,
 } from "./code-mode-matrix-provider.ts";
 import {
@@ -56,14 +55,10 @@ type ToolCall = {
   eventIndex: number;
   sessionKey?: string;
 };
-type ToolOutcome = {
-  id: string;
-  name: string;
+type ToolOutcome = Pick<ToolCall, "id" | "name" | "eventIndex" | "sessionKey"> & {
   details: RecordValue;
   content: unknown;
   isError: boolean;
-  eventIndex: number;
-  sessionKey?: string;
 };
 type ToolActivity = {
   name: string;
@@ -82,19 +77,11 @@ const MAX_OUTPUT_BYTES = SHIPPING_CODE_MODE.maxOutputBytes;
 const MAX_MODEL_OUTPUT_TOKENS = 4_000;
 const PERFORMANCE_GRADING_REVISION = "performance-outcome-v4";
 
-export type GatewayMatrixActivationDiagnostic = {
-  runId: string;
-  active: boolean;
-  toolsEnabled: boolean;
-  toolsDisabled: boolean;
-  rawRun: boolean;
-  fallbackActive: boolean;
-  allowlist?: string;
-};
+export type GatewayMatrixActivationDiagnostic = NonNullable<
+  ReturnType<typeof parseGatewayMatrixActivationDiagnostic>
+>;
 
-export function parseGatewayMatrixActivationDiagnostic(
-  line: string,
-): GatewayMatrixActivationDiagnostic | undefined {
+export function parseGatewayMatrixActivationDiagnostic(line: string) {
   const marker = "code-mode diagnostic ";
   const start = line.indexOf(marker);
   if (start < 0) {
@@ -166,38 +153,8 @@ type DeliveredFileEvidence = {
   reason?: string;
 };
 
-export type GatewayMatrixTrace = {
-  calls: ToolCall[];
-  outcomes: ToolOutcome[];
-  activities: ToolActivity[];
-  assistantTurns: number;
-  models: string[];
-  usage?: {
-    input: number;
-    output: number;
-    total?: number;
-    cacheRead?: number;
-    cacheWrite?: number;
-  };
-  costUsd?: number;
-};
-
-export type GatewayMatrixWorkload = {
-  promptSha256: string;
-  fixtureSha256: string;
-  performanceGradingRevision?: string;
-  settings: {
-    executor: CodeModeExecutorId;
-    thinking: string;
-    timeoutSeconds: number;
-    execTimeoutMs: number;
-    maxOutputBytes: number;
-    maxModelOutputTokens: number | null;
-    runtime: "openclaw";
-    fast: false;
-    allowedTools: readonly string[];
-  };
-};
+export type GatewayMatrixTrace = ReturnType<typeof collectGatewayMatrixTrace>;
+export type GatewayMatrixWorkload = ReturnType<typeof createGatewayMatrixWorkload>;
 
 export type GatewayMatrixEvidence = GatewayMatrixWorkload & {
   behavior: Record<string, boolean>;
@@ -259,7 +216,7 @@ export function createGatewayMatrixWorkload(
   thinking: string,
   timeoutSeconds: number,
   executor: CodeModeExecutorId = "node",
-): GatewayMatrixWorkload {
+) {
   const fixture = matrixFixture(task, repetition);
   return {
     ...(fixture.performance ? { performanceGradingRevision: PERFORMANCE_GRADING_REVISION } : {}),
@@ -286,8 +243,8 @@ export function createGatewayMatrixWorkload(
       execTimeoutMs: EXEC_TIMEOUT_MS,
       maxOutputBytes: MAX_OUTPUT_BYTES,
       maxModelOutputTokens: fixture.performance ? null : MAX_MODEL_OUTPUT_TOKENS,
-      runtime: "openclaw",
-      fast: false,
+      runtime: "openclaw" as const,
+      fast: false as const,
       allowedTools: gatewayAllowedTools(
         task,
         fixture.requiredTools,
@@ -349,7 +306,7 @@ function addObservedNumber(total: number | undefined, value: unknown): number | 
 }
 
 /** Only actual assistant calls and persisted terminal activity count as execution. */
-export function collectGatewayMatrixTrace(events: readonly unknown[]): GatewayMatrixTrace {
+export function collectGatewayMatrixTrace(events: readonly unknown[]) {
   const calls: ToolCall[] = [];
   const outcomes: ToolOutcome[] = [];
   const activities: ToolActivity[] = [];
@@ -439,7 +396,7 @@ export function collectGatewayMatrixTrace(events: readonly unknown[]): GatewayMa
     if (
       !call ||
       (call.name === "exec" && typeof call.args.code === "string") ||
-      ["tool_search", "tool_describe", "tool_call", "wait"].includes(call.name) ||
+      ["tool_search", "tool_describe", "dispatch_action", "wait"].includes(call.name) ||
       activities.some((item) => item.parentId === call.id && item.sessionKey === call.sessionKey)
     ) {
       continue;
@@ -1141,13 +1098,7 @@ async function waitReady(child: ManagedRun, port: number, signal?: AbortSignal):
   throw new Error("Owned benchmark Gateway did not become ready within 90 seconds");
 }
 
-type ResponseResult = {
-  id?: string;
-  status?: string;
-  final: string;
-  error?: string;
-  usage?: unknown;
-};
+type ResponseResult = Awaited<ReturnType<typeof agentRequest>>;
 
 async function agentRequest(
   port: number,
@@ -1158,7 +1109,7 @@ async function agentRequest(
   abortSignal?: AbortSignal,
   sessionKey?: string,
   maxOutputTokens?: number,
-): Promise<ResponseResult> {
+) {
   const url = `http://127.0.0.1:${port}/v1/responses`;
   const timeout = AbortSignal.timeout(timeoutSeconds * 1_000);
   const signal = abortSignal ? AbortSignal.any([timeout, abortSignal]) : timeout;
@@ -1389,62 +1340,17 @@ export async function runGatewayMatrixCell(
   }
   const port = await availablePort();
   const configPath = path.join(stateDir, "openclaw.json");
-  const baseConfig = {
-    logging: {
-      level: "info",
-      consoleLevel: "info",
-      consoleStyle: "compact",
-      file: path.join(root, "gateway.log"),
-    },
-    env: { shellEnv: { enabled: false } },
-    agents: {
-      defaults: {
-        workspace,
-        skipBootstrap: true,
-        thinkingDefault: params.thinking,
-        heartbeat: { every: "0m" },
-        systemAgent: { agentId: "qa" },
-      },
-      entries: { qa: {} },
-    },
-    plugins: {
-      allow: [
-        provider,
-        ...(executor === "quickjs" ? ["code-mode-quickjs"] : []),
-        ...(fixture.requiredTools.length ? ["code-mode-matrix-fixture"] : []),
-      ],
-      slots: { memory: "none" },
-      ...(fixture.requiredTools.length ? { load: { paths: [pluginDir] } } : {}),
-      entries: {
-        [provider]: { enabled: true },
-        ...(executor === "quickjs" ? { "code-mode-quickjs": { enabled: true } } : {}),
-        ...(fixture.requiredTools.length
-          ? { "code-mode-matrix-fixture": { enabled: true, config: { receiptsPath } } }
-          : {}),
-      },
-    },
-    memory: { search: { enabled: false } },
-    skills: { load: { watch: false } },
-    discovery: { mdns: { mode: "off" } },
-    tools: {
-      profile: "full",
-      allow: allowedTools,
-      fs: { workspaceOnly: true },
-      exec: { security: "full", ask: "off" },
-    },
-    gateway: {
-      mode: "local",
-      bind: "loopback",
-      port,
-      auth: { mode: "token", token },
-      controlUi: { enabled: false },
-      http: { endpoints: { responses: { enabled: true } } },
-    },
-  };
-  // Task-specific limits cannot change the selected treatment, runtime, or model settings.
-  const cfg = mergeDeep(mergeDeep(baseConfig, performance?.configPatch ?? {}), {
-    agents: matrixModelConfig(params.cell.model, params.thinking),
-    tools: { codeMode: { enabled: params.cell.mode === "code", executor } },
+  const cfg = createGatewayMatrixConfig({
+    root,
+    port,
+    token,
+    model: params.cell.model,
+    thinking: params.thinking,
+    mode: params.cell.mode,
+    executor,
+    requiredTools: fixture.requiredTools,
+    allowedTools,
+    configPatch: performance?.configPatch,
   });
   await fs.writeFile(configPath, JSON.stringify(cfg), { mode: 0o600 });
   const env: NodeJS.ProcessEnv = {
