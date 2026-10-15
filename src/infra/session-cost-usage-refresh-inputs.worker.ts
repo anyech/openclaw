@@ -1,5 +1,6 @@
 import type { WorkerTaskControl } from "@openclaw/worker-runtime/worker";
 import { materializeSessionArchiveForRead } from "../config/sessions/archive-compression.js";
+import { isInternalSessionEffectsKey } from "../config/sessions/internal-session-key.js";
 import {
   parseSqliteSessionFileMarker,
   type SqliteSessionFileMarker,
@@ -10,6 +11,7 @@ import { listSqliteSessionEntriesFromDatabase } from "../config/sessions/session
 import { listTranscriptInstancesFromDatabase } from "../config/sessions/session-accessor.sqlite-history.js";
 import { readTranscriptStatsBatchFromDatabase } from "../config/sessions/session-accessor.sqlite-transcript-stats.js";
 import { readWithCanonicalSessionReaderContinuation } from "../config/sessions/session-canonical-key.js";
+import type { SessionTranscriptEventTimeRange } from "../config/sessions/transcript-event-time.js";
 import { withOpenClawAgentDatabaseReadOnly } from "../state/openclaw-agent-db-readonly.js";
 import { SessionMetadataUnavailableError } from "../state/session-metadata-unavailable-error.js";
 import { LruCache } from "./lru-cache.js";
@@ -67,6 +69,7 @@ export function createUsageCostCollectionAccess(params: {
   control: WorkerTaskControl;
   target: (agentId: string, storePath: string) => UsageCostWorkerDatabase;
   readStore: <T>(agentId: string, storePath: string, read: () => T) => Promise<T>;
+  preflightSqliteEventTime?: UsageCostCollectionAccess["preflightSqliteEventTime"];
 }) {
   const { input, control, target, readStore } = params;
   const { location, operation } = input;
@@ -90,6 +93,7 @@ export function createUsageCostCollectionAccess(params: {
   }
   const access: UsageCostCollectionAccess = {
     env,
+    preflightSqliteEventTime: params.preflightSqliteEventTime,
     materializeArchive: (sourcePath) =>
       control.runNativeSection(() => materializeSessionArchiveForRead(sourcePath)),
     listSqliteMetadataStores: () => input.archiveStorePaths,
@@ -104,7 +108,7 @@ export function createUsageCostCollectionAccess(params: {
         return result.found ? result.value : [];
       });
     },
-    listSqliteInstances: async (agentId, storePath) => {
+    listSqliteInstances: async (agentId, storePath, includeAllWindows) => {
       const database = target(agentId, storePath);
       return readStore(agentId, storePath, () => {
         const result = withOpenClawAgentDatabaseReadOnly(
@@ -126,9 +130,9 @@ export function createUsageCostCollectionAccess(params: {
               return listTranscriptInstancesFromDatabase({
                 currentEntries,
                 database: opened,
-                options: {},
+                options: { includeAllWindows },
                 entryProjection: "list",
-              });
+              }).filter((instance) => !isInternalSessionEffectsKey(instance.sessionKey));
             }),
           { ...database, env },
         );
@@ -185,11 +189,15 @@ export function createUsageCostCollectionAccess(params: {
     },
   };
 
-  const inventory = async (sessionsDir?: string) =>
+  const inventory = async (
+    eventTimeRange?: SessionTranscriptEventTimeRange,
+    sessionsDir?: string,
+  ) =>
     listUsageCountedTranscriptStats(location.agentId, {
       ...access,
       storePath: location.storePath,
       sessionsDir,
+      eventTimeRange,
     });
   return {
     access,

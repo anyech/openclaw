@@ -1,4 +1,5 @@
 import { materializeSessionArchiveForRead } from "../config/sessions/archive-compression.js";
+import { sessionTranscriptEventsOverlapRange } from "../config/sessions/session-accessor.sqlite-event-time.worker.js";
 import { listSessionTranscriptArchivesReadOnly } from "../config/sessions/session-accessor.sqlite-history.js";
 import {
   readTranscriptStatsBatchReadOnlySync,
@@ -31,8 +32,13 @@ function createNativeStorageUsageAccess(env?: NodeJS.ProcessEnv): UsageCostColle
         includeAllAgents: true,
         env,
       }),
-    listSqliteInstances: async (agentId, storePath) =>
-      listSessionTranscriptInstances({ agentId, storePath, env, projection: "list" }),
+    listSqliteInstances: async (agentId, storePath, includeAllWindows) =>
+      listSessionTranscriptInstances(
+        { agentId, storePath, env, projection: "list" },
+        { includeAllWindows },
+      ),
+    preflightSqliteEventTime: (marker, range, updatedAtMs) =>
+      sessionTranscriptEventsOverlapRange(marker, range, updatedAtMs, env),
     readSqliteStats: async (markers) => {
       const scopes = markers.map((marker) => ({ ...marker, env }));
       return scopes.length === 1

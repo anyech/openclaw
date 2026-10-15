@@ -12,6 +12,7 @@ import { withEnvAsync } from "../test-utils/env.js";
 import { claimAgentRunContext, releaseAgentRunContext } from "./agent-run-registry.js";
 import { refreshCostUsageCacheForAgent } from "./session-cost-usage-aggregation.js";
 import { requestCostUsageCacheRefresh } from "./session-cost-usage-cache-runtime.js";
+import type { SessionCostUsageRollupRow } from "./session-cost-usage-cache.kernel.js";
 import {
   loadCostUsageSummaryFromCache,
   loadSessionCostSummariesFromCache,
@@ -101,6 +102,9 @@ describe("session cost usage refresh", () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(refresh).toHaveBeenCalledTimes(12);
         expect(refresh.mock.calls[10]?.[0].sessionFiles).toBeUndefined();
+        expect(refresh.mock.calls.slice(0, 11).every(([request]) => request.startMs === 0)).toBe(
+          true,
+        );
         expect(refresh.mock.calls[11]?.[0].sessionFiles).toEqual([sessionFile]);
 
         await vi.advanceTimersByTimeAsync(49);
@@ -132,6 +136,83 @@ describe("session cost usage refresh", () => {
           refresh.mockReset();
           vi.useRealTimers();
         }
+      }
+    });
+  });
+
+  it("keeps a newer selected rebuild row after a bounded full refresh returns busy", async () => {
+    await withRefreshFixture(async ({ agentId, sessionFiles }) => {
+      const sessionFile = sessionFiles[0];
+      const olderRow = {
+        key: sessionFile,
+        updatedAt: 1,
+        valueJson: "older cached row",
+      } satisfies SessionCostUsageRollupRow;
+      const newerRow = {
+        key: sessionFile,
+        updatedAt: 2,
+        valueJson: "newer cached row",
+      } satisfies SessionCostUsageRollupRow;
+      const scope = new AsyncWorkScope();
+      const storePath = path.dirname(sessionFile);
+      const enqueue = (request: {
+        sessionFiles?: string[];
+        startMs?: number;
+        endMs?: number;
+        rebuildRows?: SessionCostUsageRollupRow[];
+      }) =>
+        scope.run(() => requestCostUsageCacheRefresh({ config, agentId, storePath, ...request }));
+
+      const firstAttempt = createDeferredCore<"busy" | "refreshed">();
+      const refresh = vi.mocked(refreshCostUsageCacheForAgent);
+      refresh.mockReset();
+      let calls = 0;
+      refresh.mockImplementation(async () => {
+        calls += 1;
+        return calls === 1 ? await firstAttempt.promise : "refreshed";
+      });
+
+      try {
+        // Queue publications directly: exact reads intentionally take priority on main.
+        enqueue({ sessionFiles: [sessionFile], rebuildRows: [olderRow] });
+        enqueue({ startMs: 10, endMs: 20 });
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(refresh).toHaveBeenCalledOnce();
+        expect(refresh.mock.calls[0]?.[0]).toMatchObject({
+          startMs: 10,
+          endMs: 20,
+          rebuildRows: [olderRow],
+        });
+
+        enqueue({ sessionFiles: [sessionFile], rebuildRows: [newerRow] });
+        firstAttempt.resolve("busy");
+        await vi.advanceTimersByTimeAsync(49);
+        expect(refresh).toHaveBeenCalledOnce();
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect(refresh).toHaveBeenCalledTimes(2);
+        // The completed bounded retry yields before the selected rebuild pass.
+        await vi.advanceTimersByTimeAsync(1);
+        expect(refresh).toHaveBeenCalledTimes(3);
+        expect(refresh.mock.calls[1]?.[0]).toMatchObject({
+          startMs: 10,
+          endMs: 20,
+          rebuildRows: [newerRow],
+        });
+        expect(refresh.mock.calls[1]?.[0].sessionFiles).toBeUndefined();
+        expect(refresh.mock.calls[2]?.[0]).toMatchObject({
+          sessionFiles: [sessionFile],
+          rebuildRows: [newerRow],
+        });
+        expect(refresh.mock.calls[2]?.[0].startMs).toBeUndefined();
+        expect(refresh.mock.calls[2]?.[0].endMs).toBeUndefined();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        firstAttempt.resolve("refreshed");
+        await vi.runOnlyPendingTimersAsync();
+        await scope.drain();
+        refresh.mockReset();
       }
     });
   });
