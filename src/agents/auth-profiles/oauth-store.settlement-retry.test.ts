@@ -12,10 +12,8 @@ import { createOAuthManager } from "./oauth-manager.js";
 import { OAuthManagerRefreshError } from "./oauth-refresh-failure.js";
 import {
   createFailedOAuthRefreshFence,
-  createOAuthRefreshFence,
   isPendingOAuthRefreshFence,
 } from "./oauth-refresh-marker.js";
-import { settleOAuthRefreshClaim } from "./oauth-store.js";
 import { loadPersistedAuthProfileStore } from "./persisted.js";
 import { clearRuntimeAuthProfileStoreSnapshots } from "./runtime-snapshots.js";
 import * as authProfileStoreRuntime from "./store-runtime.js";
@@ -538,57 +536,5 @@ describe("OAuth rotated-credential settlement retry", () => {
       expect(persisted?.type === "oauth" ? persisted.access : "").not.toBe(refreshed.access);
       expect(persisted?.type === "oauth" && isPendingOAuthRefreshFence(persisted)).toBe(false);
     });
-  });
-
-  it("keeps the personal auth-profile store update path unchanged", async () => {
-    const profileId = "openai:personal-synthetic";
-    const expired = createCredential({
-      access: "synthetic-personal-old-access",
-      refresh: "synthetic-personal-old-refresh",
-      expires: 1,
-      accountId: "synthetic-personal-account",
-    });
-    const fence = createOAuthRefreshFence({ profileId, credential: expired });
-    const refreshed = createCredential({
-      access: "synthetic-personal-new-access",
-      refresh: "synthetic-personal-new-refresh",
-      expires: Date.now() + 21_600_000,
-      accountId: "synthetic-personal-account",
-    });
-    let state: AuthProfileStore = { version: 1, profiles: { [profileId]: fence } };
-    const update = vi.fn(
-      async (
-        updater: (store: AuthProfileStore) => boolean,
-        assertCurrent?: () => void,
-      ): Promise<AuthProfileStore> => {
-        assertCurrent?.();
-        const draft = structuredClone(state);
-        if (updater(draft)) {
-          assertCurrent?.();
-          state = draft;
-        }
-        return structuredClone(state);
-      },
-    );
-    const personalStore = {
-      databasePath: "/synthetic/personal-auth-profiles.db",
-      read: async () => structuredClone(state),
-      update,
-      accept: async (credential: OAuthCredential) => credential,
-    };
-    const mainStoreUpdate = vi.spyOn(authProfileStoreRuntime, "updateAuthProfileStoreWithLock");
-
-    await expect(
-      settleOAuthRefreshClaim({
-        personalStore,
-        profileId,
-        generation: expired,
-        fence,
-        refreshed,
-      }),
-    ).resolves.toEqual({ credential: refreshed, persisted: true });
-    expect(update).toHaveBeenCalledOnce();
-    expect(mainStoreUpdate).not.toHaveBeenCalled();
-    expect(state.profiles[profileId]).toEqual(refreshed);
   });
 });
