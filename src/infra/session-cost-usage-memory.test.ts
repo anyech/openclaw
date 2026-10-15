@@ -76,7 +76,7 @@ async function fixture(
   const append = async (
     input: number,
     cost = { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
-    timestamp: string = "2026-10-01T12:00:00.000Z",
+    timestamp = "2026-10-01T12:00:00.000Z",
   ) => {
     const id = `assistant-${++next}`;
     expect(
