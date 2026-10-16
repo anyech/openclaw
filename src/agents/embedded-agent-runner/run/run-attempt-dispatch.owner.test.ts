@@ -165,6 +165,11 @@ type DispatchCase = {
   configuredContextEngine?: boolean;
   diffBaseline?: "settled" | "failed" | "revoked";
   cancelTrajectory?: boolean;
+  authProfileCase?: {
+    lastProfileId: string | undefined;
+    lockedProfileId: string | undefined;
+    expectedSource: "auto" | "user" | undefined;
+  };
 };
 
 const dispatchCases: DispatchCase[] = [
@@ -173,12 +178,60 @@ const dispatchCases: DispatchCase[] = [
     sandboxSessionKey: "global",
     diffBaseline,
   })),
-  { agentId: "main", skillCatalog: "host", configuredContextEngine: true },
-  { sandboxSessionKey: "global", skillCatalog: "sandbox", oneShotCliRun: true },
-  { sandboxSessionKey: "agent:main:policy", oneShotCliRun: false },
-  { oneShotCliRun: false, managedWorkspace: true },
-  { oneShotCliRun: false, managedWorkspace: true, realManagedWorkspace: true },
-  { agentId: "main", remoteSkills: true, oneShotCliRun: false, retirePlacement: true },
+  {
+    agentId: "main",
+    skillCatalog: "host" as const,
+    configuredContextEngine: true,
+    authProfileCase: {
+      lastProfileId: "fixture:selected",
+      lockedProfileId: "fixture:selected",
+      expectedSource: "user",
+    },
+  },
+  {
+    sandboxSessionKey: "global",
+    skillCatalog: "sandbox" as const,
+    oneShotCliRun: true,
+    authProfileCase: {
+      lastProfileId: "fixture:auto",
+      lockedProfileId: "fixture:selected",
+      expectedSource: "auto",
+    },
+  },
+  {
+    sandboxSessionKey: "agent:main:policy",
+    oneShotCliRun: false,
+    authProfileCase: {
+      lastProfileId: undefined,
+      lockedProfileId: undefined,
+      expectedSource: undefined,
+    },
+  },
+  {
+    agentId: "main",
+    remoteSkills: true,
+    oneShotCliRun: true,
+    authProfileCase: {
+      lastProfileId: undefined,
+      lockedProfileId: "fixture:selected",
+      expectedSource: undefined,
+    },
+  },
+  {
+    oneShotCliRun: false,
+    managedWorkspace: true,
+  },
+  {
+    oneShotCliRun: false,
+    managedWorkspace: true,
+    realManagedWorkspace: true,
+  },
+  {
+    agentId: "main",
+    remoteSkills: true,
+    oneShotCliRun: false,
+    retirePlacement: true,
+  },
   ...(["allowed", "outside"] as const).map((hostMedia) => ({
     remoteSkills: true,
     oneShotCliRun: false,
@@ -191,6 +244,7 @@ const dispatchCases: DispatchCase[] = [
 it.each(dispatchCases)(
   "dispatches the generic harness for $agentId/global with policy $sandboxSessionKey, $skillCatalog skills, remote skills $remoteSkills, one-shot $oneShotCliRun, real managed workspace $realManagedWorkspace, host media $hostMedia, retired placement $retirePlacement, baseline $diffBaseline, cancelled trajectory $cancelTrajectory",
   async ({
+    authProfileCase,
     agentId = "work",
     sandboxSessionKey,
     remoteSkills = false,
@@ -479,6 +533,7 @@ it.each(dispatchCases)(
         preparedRuntime: {
           provider: "fixture",
           modelId: "fixture-model",
+          lockedProfileId: authProfileCase?.lockedProfileId,
           requestedModelId: "fixture-model",
           nativeModelOwned: true,
           attemptAuthProfileStore: authProfileStore,
@@ -486,6 +541,7 @@ it.each(dispatchCases)(
           snapshot: () => ({
             agentHarness: { id: harnessId },
             pluginHarnessOwnsTransport: true,
+            lastProfileId: authProfileCase?.lastProfileId,
             effectiveModel: {
               id: "fixture-model",
               provider: "fixture",
@@ -728,6 +784,14 @@ it.each(dispatchCases)(
             gitCoauthorPrompt,
           }),
         );
+        if (authProfileCase) {
+          const dispatchedAttempt = runAttempt.mock.calls[0]?.[0];
+          if (!dispatchedAttempt) {
+            throw new Error("Expected owner harness to capture the dispatched attempt");
+          }
+          expect(dispatchedAttempt.authProfileId).toBe(authProfileCase.lastProfileId);
+          expect(dispatchedAttempt.authProfileIdSource).toBe(authProfileCase.expectedSource);
+        }
         expect(resolveSessionGitCoauthorPrompt).toHaveBeenCalledExactlyOnceWith({
           config,
           agentId,
@@ -768,6 +832,9 @@ it.each(dispatchCases)(
           } else {
             expect(sandbox?.workspaceDir.startsWith(state.path("sandbox"))).toBe(true);
           }
+        } else if (remoteSkills) {
+          expect(provisioned).toEqual([]);
+          expect(sandbox).toBe(remoteSandbox);
         } else {
           expect(provisioned).toEqual([]);
           expect(sandbox).toBeNull();
