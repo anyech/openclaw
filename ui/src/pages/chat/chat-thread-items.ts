@@ -13,6 +13,7 @@ import {
   normalizeRoleForGrouping,
   normalizeMessage,
 } from "../../lib/chat/message-normalizer.ts";
+import { hasVisiblePreparedActivity } from "../../lib/chat/tool-call-grouping.ts";
 import {
   extractToolCardsCached,
   extractToolPreview,
@@ -91,6 +92,8 @@ export function messageMatchesSearchQuery(
 }
 
 type ChatMessagePreview = {
+  runId?: string;
+  parentToolCallId?: string;
   preview: CanvasToolPreview;
   text: string | null;
   timestamp: number | null;
@@ -122,6 +125,8 @@ function readChatMessagePreview(toolMessage: Record<string, unknown>): ChatMessa
     const card = cards[index];
     if (card?.preview?.kind === "canvas") {
       return {
+        runId: card.runId,
+        parentToolCallId: card.parentToolCallId,
         preview: card.preview,
         text: card.outputText ?? null,
         timestamp: rawMessageTimestamp(toolMessage),
@@ -140,13 +145,16 @@ export function canvasPreviewBaseIdentity(
   message: unknown,
   source: ChatMessagePreview,
 ): string | null {
-  const toolCallId = resolveMessageToolUseId(asRecord(message) ?? {});
+  // A nested result and its wrapper are receipts for the same invocation.
+  const toolCallId = source.parentToolCallId ?? resolveMessageToolUseId(asRecord(message) ?? {});
   const previewId = source.preview.viewId
     ? `viewId:${source.preview.viewId}`
     : source.preview.url
       ? `url:${source.preview.url}`
       : null;
-  return toolCallId && previewId ? JSON.stringify([toolCallId, previewId]) : null;
+  return toolCallId && previewId
+    ? JSON.stringify([source.runId ?? null, toolCallId, previewId])
+    : null;
 }
 
 export function createCanvasAssistantMessage(
@@ -423,7 +431,8 @@ export function hasRenderableNormalizedMessage(
     normalized.content.length ||
     normalized.replyTarget ||
     label ||
-    (role === "user" && readTranscriptMediaEntries(message).length),
+    hasVisiblePreparedActivity(message) ||
+    readTranscriptMediaEntries(message).length,
   );
 }
 

@@ -47,6 +47,11 @@ agents still preparing and `stage` identifies the current acquisition phase.
 The Gateway remains running and completed agents remain usable. Background
 preparation clears the degraded status when all runtimes are ready.
 
+If a newer model-runtime refresh replaces preparation in progress, startup
+follows the admitted replacement through preparation and publication. Cancelling
+the retired acquisition does not stop the Gateway; genuine replacement failures
+still propagate.
+
 Transcript projection repair runs after readiness in yielding worker-backed work.
 An agent deferred by database inspection becomes usable after its session,
 credentials, and model preparation finish; rebuilding its transcript projections
@@ -112,6 +117,43 @@ probes: they still wait for initialization and retain their normal authenticatio
 
 A default or system agent database with pending startup inspection/preparation or a confirmed admission failure keeps readiness false, with `failing: ["agent-database:<id>"]` and the exact admission reason and repair hint in `agentDatabases`. Pending startup inspection is reported there with code `agent-database-inspection-pending`. The HTTP listener, Control UI, and admitted agents remain available while readiness is false; pending optional agents do not hold readiness. Readiness does not wait for post-ready subagent recovery or transcript maintenance. Agent-scoped `sessions.list`, plus `sessions.resolve`, `sessions.describe`, and `models.list`, wait up to 20 seconds for their selected agents to finish startup preparation, then recheck request authorization before reading. Requests targeting healthy agents proceed independently. Unscoped session lists continue returning admitted agents while other stores prepare. Writes still require completed admission. RPC requests refused for pending inspection return `UNAVAILABLE` with `retryable: true` and `retryAfterMs: 250`; callers can retry the same request after that delay. Inspection failures and ownership mismatches remain non-retryable. A refused optional agent can remain isolated while healthy agents serve requests. Gateway ready announcements use the same readiness decision.
 
+If a newer model-runtime publication supersedes deferred agent preparation, admission
+waits for that publication once, then retries preparation against current configuration
+and secrets. Recovery uses the existing four-attempt startup publication budget without
+reopening or migrating the database again. A failed publication or exhausted budget
+keeps the agent unavailable and records its reason and repair hint in readiness.
+
+If Node.js is upgraded or removed while the Gateway is running, its retained
+runtime may stop launching child workers even though the Gateway process is
+still alive. A confirmed missing executable or runtime loader failure marks
+`childRuntime.available` as `false` in health/status and makes `/readyz` return
+`503` with `failing: ["child-runtime"]`. Worker requests explain which runtime
+failed and ask you to restart the Gateway. The diagnosis is logged once and
+further worker launches fail immediately; ordinary worker crashes do not mark
+the runtime unavailable. A health or readiness check that finds the executable
+missing publishes the same diagnosis, even when resident workers still serve reads.
+
+For a service-managed Gateway, the lifecycle owner checks the effective service
+command's Node with a bounded `--version` probe. On macOS, the loaded launchd
+job must also match the service definition on disk. If the probe succeeds, the
+Gateway requests one graceful restart: new work is fenced, active work drains,
+and the supervisor starts a fresh process. An in-process restart cannot repair
+a missing runtime and is never used for this recovery.
+
+The Gateway stays up in report-only mode if the service Node is also unusable,
+the command or recent restart history cannot be verified, or runtime recovery
+was the most recent shutdown within five minutes. Unmanaged foreground and
+embedded Gateways, external supervisors without a verifiable native service
+command, and `OPENCLAW_NO_RESPAWN=1` also remain report-only. Repair the service
+runtime, then use `openclaw gateway restart` (or your process owner's restart).
+
+The existing `childRuntime.available: false` health field and `child-runtime`
+readiness reason remain visible. The runtime log records `restart-requested` or
+`report-only` with the decision reason. Repeated worker failures do not request
+another restart. If a prepared supervisor handoff later fails, the old
+Gateway completes shutdown instead of attempting an in-process restart; inspect
+the logs and restart through the service owner.
+
 A broken Telegram or other channel account can also make `/readyz` return `503` while `/startupz` remains started. Neither check replaces the other: startup completion alone does not certify agent or channel availability.
 
 Disabled, unconfigured, and ordinarily unlinked accounts do not fail channel readiness. An enabled, configured account with a recorded terminal disconnect, blocked lifecycle, or unavailable ingress still fails its health check even if it becomes unlinked. For example, a terminal WhatsApp logout makes `/readyz` return `503` with `failing: ["whatsapp"]` in detailed responses. Terminal disconnects and blocked accounts require operator action; the health monitor does not restart them.
@@ -156,10 +198,12 @@ export, native event-loop delay sampling runs at 20 ms resolution and the Gatewa
 publishes completed observations once per second. A healthy idle Gateway publishes
 every ten seconds and pauses the native histogram. Idle windows still track
 blocking callbacks and overdue sampling deadlines; `delayP99Ms` is zero while the
-histogram is paused. Work or an exporter becoming active restores full sampling
-at the next idle deadline, within ten seconds. Long blocking callbacks remain part
-of the observation even when they delay the publisher. No snapshot is available
-until the first window completes. Its
+histogram is paused. Work becoming active restores full sampling at the next idle
+deadline, within ten seconds. A newly interested exporter advances the pending
+sample to the current window's one-second boundary, or schedules it immediately
+if that boundary has already elapsed, without resetting the window. Long blocking
+callbacks remain part of the observation even when they delay the publisher.
+No snapshot is available until the first window completes. Its
 `cpuCoreRatio` measures user and system CPU time across the whole Gateway process,
 including worker and native threads, divided by elapsed wall time. The unit is
 core equivalents: `1` means one CPU core fully occupied over the interval, and
@@ -260,6 +304,12 @@ gateway refreshes that cache in the background; `--verbose` forces a live check 
 Connections and cached health reads share a one-minute background refresh cadence, so
 repeated diagnostic connections do not each rebuild the health snapshot. Explicit live
 checks and refreshes for missing or stale health still run immediately.
+The passive WebSocket `health` event sends the full snapshot only when health changes.
+Refresh timestamps, check duration, session activity summaries, channel traffic
+timestamps, auth age, and event-loop sample readings alone do not trigger an event.
+Channel lifecycle and error changes, event-loop degradation, and other health status
+changes still publish on the next refresh. Use `tick` for connection liveness and the
+`health` RPC for current diagnostic readings; hello snapshots retain their health field.
 Snapshots describe loaded and configured channels. Stored credentials alone do not
 activate a channel or add it to Gateway health; use channel setup to enable it.
 The command reports linked creds/auth age when available, per-channel check summaries,

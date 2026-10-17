@@ -3,6 +3,7 @@ import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { JSX } from "@solidjs/web";
 import { For, Show, createMemo, createSignal } from "solid-js";
+import { TRANSCRIPT_SOURCE_LOCATOR_FIELDS } from "../../../../src/plugins/manifest-contract-keys.js";
 import { hasOperatorAdminAccess, hasOperatorReadAccess } from "../../app/operator-access.ts";
 import { ShellLayoutBoundary } from "../../app/shell-layout-traits-solid.tsx";
 import { Icon } from "../../components/solid/icon.tsx";
@@ -20,13 +21,11 @@ import { registerTranscriptsEnglish } from "../../i18n/locales/en-transcripts.ts
 import { formatUiError } from "../../lib/format-error.ts";
 import { useApplication } from "../../lib/reactive/context.ts";
 import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
-import { defineSolidBridge } from "../../lit/solid-bridge.ts";
 import { createSettingsStatus } from "./settings-status.ts";
 import { COMMUNICATION_SETTINGS_TARGET_IDS } from "./settings-targets.ts";
 registerEnglishCatalog(registerTranscriptsEnglish);
 
-const LOCATOR_FIELDS = ["accountId", "guildId", "channelId", "meetingUrl"] as const;
-const SOURCE_FIELDS = ["title", ...LOCATOR_FIELDS, "sessionId"] as const;
+const SOURCE_FIELDS = ["title", ...TRANSCRIPT_SOURCE_LOCATOR_FIELDS, "sessionId"] as const;
 type SourceProvider = TranscriptsStatusResult["providers"][number];
 
 function supportsAutoStartSetup(provider: SourceProvider | undefined): boolean {
@@ -38,11 +37,11 @@ function supportsAutoStartSetup(provider: SourceProvider | undefined): boolean {
 }
 
 type SettingsProps = {
-  mutationDisabled: boolean;
-  buildEditor: (() => JSX.Element) | undefined;
-  advancedExpanded: boolean;
+  mutationDisabled?: boolean;
+  buildEditor?: () => JSX.Element;
+  advancedExpanded?: boolean;
 };
-function MeetingCaptureSettingsContent(props: SettingsProps) {
+export function MeetingCaptureSettings(props: SettingsProps) {
   const context = useApplication();
   const {
     client,
@@ -194,7 +193,7 @@ function MeetingCaptureSettingsContent(props: SettingsProps) {
         delete source[key];
       }
     }
-    const missing = LOCATOR_FIELDS.find(
+    const missing = TRANSCRIPT_SOURCE_LOCATOR_FIELDS.find(
       (key) => locatorRequirements()?.[key] === "required" && !normalizeOptionalString(source[key]),
     );
     if (missing) {
@@ -249,7 +248,7 @@ function MeetingCaptureSettingsContent(props: SettingsProps) {
     const fields = () =>
       [
         "title",
-        ...LOCATOR_FIELDS.filter(
+        ...TRANSCRIPT_SOURCE_LOCATOR_FIELDS.filter(
           (key) => locatorRequirements()?.[key] || source?.[key] !== undefined,
         ),
         "sessionId",
@@ -372,7 +371,10 @@ function MeetingCaptureSettingsContent(props: SettingsProps) {
               ? source.title
               : (normalizeOptionalString(source?.providerId) ?? t("transcripts.unknown"))
           }
-          description={[provider?.name, ...LOCATOR_FIELDS.map((key) => source?.[key])]
+          description={[
+            provider?.name,
+            ...TRANSCRIPT_SOURCE_LOCATOR_FIELDS.map((key) => source?.[key]),
+          ]
             .filter((value) => typeof value === "string" && value)
             .join(" · ")}
           control={
@@ -410,7 +412,7 @@ function MeetingCaptureSettingsContent(props: SettingsProps) {
       );
     });
   return (
-    <>
+    <openclaw-meeting-capture-settings>
       <SettingsPage>
         <div class="settings-stack" id={COMMUNICATION_SETTINGS_TARGET_IDS.meetingCapture}>
           <SettingsSection
@@ -544,7 +546,7 @@ function MeetingCaptureSettingsContent(props: SettingsProps) {
                   <SettingsRow
                     title={item.title ?? item.source.providerId}
                     description={[
-                      ...LOCATOR_FIELDS.map((key) => item.source[key]),
+                      ...TRANSCRIPT_SOURCE_LOCATOR_FIELDS.map((key) => item.source[key]),
                       item.startDiagnostic
                         ? t(`meetingCapture.startDiagnostics.${item.startDiagnostic}`)
                         : undefined,
@@ -584,18 +586,6 @@ function MeetingCaptureSettingsContent(props: SettingsProps) {
           {props.buildEditor?.()}
         </details>
       </ShellLayoutBoundary>
-    </>
+    </openclaw-meeting-capture-settings>
   );
 }
-
-export const MeetingCaptureSettings = defineSolidBridge<SettingsProps>(
-  "openclaw-meeting-capture-settings",
-  (props) => <MeetingCaptureSettingsContent {...props} />,
-  {
-    properties: {
-      mutationDisabled: { default: false, type: Boolean },
-      buildEditor: { default: undefined, attribute: false },
-      advancedExpanded: { default: false, type: Boolean },
-    },
-  },
-);

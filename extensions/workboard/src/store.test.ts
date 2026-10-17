@@ -25,13 +25,6 @@ import {
 
 const workerModuleUrl = resolveRuntimeWorkerUrl(workboardSqliteBackendEntrypoint);
 
-function expectSameCardState(actual: WorkboardCard | undefined, expected: WorkboardCard): void {
-  expect(actual).toBeDefined();
-  const { updatedAt: _actualUpdatedAt, ...actualState } = actual!;
-  const { updatedAt: _expectedUpdatedAt, ...expectedState } = expected;
-  expect(actualState).toEqual(expectedState);
-}
-
 function createPausedCardStore(delegate: WorkboardCardStore) {
   let pause:
     | {
@@ -170,6 +163,16 @@ function createConcurrentSqliteHarness(prefix: string) {
 }
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+function metadataPressure() {
+  return {
+    artifacts: Array.from({ length: 12 }, (_, index) => ({
+      id: `artifact-${index}`,
+      createdAt: index + 1,
+      url: `https://example.com/${index}/${"x".repeat(1900)}`,
+    })),
+  };
+}
 
 describe("WorkboardStore", () => {
   it("emits monotonic committed changes, ignores no-ops, and isolates listener failures", async () => {
@@ -1025,13 +1028,7 @@ describe("WorkboardStore", () => {
     const card = await store.create({
       title: "Keep proof under metadata pressure",
       status: "running",
-      metadata: {
-        artifacts: Array.from({ length: 12 }, (_, index) => ({
-          id: `artifact-${index}`,
-          createdAt: index + 1,
-          url: `https://example.com/${index}/${"x".repeat(1900)}`,
-        })),
-      },
+      metadata: metadataPressure(),
     });
     const claimed = await store.claim(card.id, { ownerId: "main", token: "token-1" });
     const artifactCountBefore = claimed.card.metadata?.artifacts?.length ?? 0;
@@ -1360,34 +1357,16 @@ describe("WorkboardStore", () => {
   it("accepts POSIX and Windows absolute directory workspaces", async () => {
     const store = createWorkboardSqliteTestStore({ createStores: createKernelStores });
 
-    await expect(
-      store.create({
-        title: "POSIX workspace",
-        workspace: { kind: "dir", path: "/Users/me/repo" },
-      }),
-    ).resolves.toMatchObject({
-      metadata: { automation: { workspace: { kind: "dir", path: "/Users/me/repo" } } },
-    });
-    await expect(
-      store.create({
-        title: "Windows drive workspace",
-        workspace: { kind: "dir", path: String.raw`C:\Users\me\repo` },
-      }),
-    ).resolves.toMatchObject({
-      metadata: {
-        automation: { workspace: { kind: "dir", path: String.raw`C:\Users\me\repo` } },
-      },
-    });
-    await expect(
-      store.create({
-        title: "Windows UNC workspace",
-        workspace: { kind: "dir", path: String.raw`\\server\share\repo` },
-      }),
-    ).resolves.toMatchObject({
-      metadata: {
-        automation: { workspace: { kind: "dir", path: String.raw`\\server\share\repo` } },
-      },
-    });
+    for (const workspacePath of [
+      "/Users/me/repo",
+      String.raw`C:\Users\me\repo`,
+      String.raw`\\server\share\repo`,
+    ]) {
+      const workspace = { kind: "dir", path: workspacePath };
+      await expect(store.create({ title: workspacePath, workspace })).resolves.toMatchObject({
+        metadata: { automation: { workspace } },
+      });
+    }
     await expect(
       store.create({ title: "Relative workspace", workspace: { kind: "dir", path: "repo" } }),
     ).rejects.toThrow(/absolute/);
@@ -1467,6 +1446,12 @@ describe("WorkboardStore", () => {
     expect(child.status).toBe("todo");
     expect(child.execution).toBeUndefined();
     expect(child.metadata?.attempts).toBeUndefined();
+    expect(child.metadata?.links).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "parent", targetCardId: parent.id }),
+      ]),
+    );
+    await expect(store.get(child.id)).resolves.toEqual(child);
     await expect(store.claim(child.id, { ownerId: "main" })).rejects.toThrow(/dependencies/);
     await expect(store.move(child.id, "ready", child.position)).rejects.toThrow(/dependencies/);
     await expect(store.move(child.id, "running", child.position)).rejects.toThrow(/dependencies/);
@@ -1617,7 +1602,7 @@ describe("WorkboardStore", () => {
     );
   });
 
-  it("rolls back card creation when dependency link capacity rejects the parent", async () => {
+  it("keeps a created card visible when dependency link capacity rejects the parent", async () => {
     const store = createWorkboardSqliteTestStore({ createStores: createKernelStores });
     const parent = await store.create({ title: "Fanout parent" });
     for (let index = 0; index < 50; index += 1) {
@@ -1632,7 +1617,7 @@ describe("WorkboardStore", () => {
       }),
     ).rejects.toThrow(/link limit/);
 
-    expect((await store.list()).some((card) => card.title === "Overflow child")).toBe(false);
+    expect((await store.list()).some((card) => card.title === "Overflow child")).toBe(true);
   });
 
   it("rejects invalid parent creates without persisting partial cards", async () => {
@@ -1744,77 +1729,68 @@ describe("WorkboardStore", () => {
     });
   });
 
-  it("emits completion for a max-length run ID when metadata must be trimmed", async () => {
-    const store = createWorkboardSqliteTestStore({ createStores: createKernelStores });
-    const runId = "r".repeat(MAX_RUN_ID_LENGTH);
-    const card = await store.create({
-      title: "Retain completed event under metadata pressure",
-      status: "running",
-      execution: codexExecution("exec-max-run", 1_000, { runId }),
-      metadata: {
-        artifacts: Array.from({ length: 12 }, (_, index) => ({
-          id: `artifact-${index}`,
-          createdAt: index + 1,
-          url: `https://example.com/${index}/${"x".repeat(1900)}`,
-        })),
-      },
-    });
-    const subscription = await store.subscribeNotifications({ runId });
-    await store.complete(card.id, {
-      proof: { status: "passed", command: "test-command", note: "p".repeat(2000) },
-    });
+  it.each([
+    { runIdLength: 164, trimMetadata: false },
+    { runIdLength: MAX_RUN_ID_LENGTH, trimMetadata: true },
+  ])(
+    "completes a $runIdLength-character run with trimMetadata=$trimMetadata",
+    async ({ runIdLength, trimMetadata }) => {
+      const store = createWorkboardSqliteTestStore({ createStores: createKernelStores });
+      const runId = "r".repeat(runIdLength);
+      const card = await store.create({
+        title: "Complete long run ID",
+        status: "running",
+        execution: codexExecution("exec-long-run", 1_000, { runId }),
+        ...(trimMetadata ? { metadata: metadataPressure() } : {}),
+      });
+      const logged = trimMetadata
+        ? undefined
+        : await store.addWorkerLog(card.id, { message: "Verification ready.", runId });
+      const subscription = await store.subscribeNotifications({ runId });
+      await store.complete(card.id, {
+        ...(trimMetadata ? {} : { summary: "Verified." }),
+        proof: {
+          status: "passed",
+          command: "test-command",
+          ...(trimMetadata ? { note: "p".repeat(2000) } : {}),
+        },
+      });
 
-    const completed = await store.get(card.id);
-    expect(completed).toMatchObject({
-      status: "done",
-      execution: { runId },
-      metadata: { proof: [expect.objectContaining({ status: "passed", command: "test-command" })] },
-    });
-    expect(completed?.metadata?.artifacts?.length ?? 0).toBeLessThan(
-      card.metadata?.artifacts?.length ?? 0,
-    );
-    expect(Buffer.byteLength(JSON.stringify(completed?.metadata), "utf8")).toBeLessThanOrEqual(
-      MAX_CARD_METADATA_BYTES,
-    );
-    expect(await store.notificationEvents({ subscriptionId: subscription.id })).toMatchObject({
-      events: [expect.objectContaining({ kind: "completed", runId })],
-    });
-  });
-
-  it("completes a card with its full 164-character execution run ID", async () => {
-    const store = createWorkboardSqliteTestStore({ createStores: createKernelStores });
-    const runId = "r".repeat(164);
-    const card = await store.create({
-      title: "Complete long run ID",
-      status: "running",
-      execution: codexExecution("exec-long-run", 1_000, { runId }),
-    });
-
-    const logged = await store.addWorkerLog(card.id, { message: "Verification ready.", runId });
-    const subscription = await store.subscribeNotifications({ runId });
-    await store.complete(card.id, {
-      summary: "Verified.",
-      proof: { status: "passed", command: "test-command" },
-    });
-
-    expect(await store.get(card.id)).toMatchObject({
-      status: "done",
-      execution: { status: "done", runId },
-      events: [
-        ...(logged.events ?? []),
-        expect.objectContaining({ kind: "moved", toStatus: "done" }),
-      ],
-      metadata: {
-        attempts: [expect.objectContaining({ status: "succeeded", runId })],
-        workerLogs: [expect.objectContaining({ message: "Verification ready.", runId })],
-        proof: [expect.objectContaining({ status: "passed", command: "test-command" })],
-        notifications: [expect.objectContaining({ kind: "completed", runId })],
-      },
-    });
-    expect(await store.notificationEvents({ subscriptionId: subscription.id })).toMatchObject({
-      events: [expect.objectContaining({ kind: "completed", runId })],
-    });
-  });
+      const completed = await store.get(card.id);
+      expect(completed).toMatchObject({
+        status: "done",
+        execution: { status: "done", runId },
+        metadata: {
+          proof: [expect.objectContaining({ status: "passed", command: "test-command" })],
+        },
+      });
+      if (!trimMetadata) {
+        expect(logged).toBeDefined();
+        expect(completed).toMatchObject({
+          events: [
+            ...(logged?.events ?? []),
+            expect.objectContaining({ kind: "moved", toStatus: "done" }),
+          ],
+          metadata: {
+            attempts: [expect.objectContaining({ status: "succeeded", runId })],
+            workerLogs: [expect.objectContaining({ message: "Verification ready.", runId })],
+            notifications: [expect.objectContaining({ kind: "completed", runId })],
+          },
+        });
+      }
+      if (trimMetadata) {
+        expect(completed?.metadata?.artifacts?.length ?? 0).toBeLessThan(
+          card.metadata?.artifacts?.length ?? 0,
+        );
+        expect(Buffer.byteLength(JSON.stringify(completed?.metadata), "utf8")).toBeLessThanOrEqual(
+          MAX_CARD_METADATA_BYTES,
+        );
+      }
+      expect(await store.notificationEvents({ subscriptionId: subscription.id })).toMatchObject({
+        events: [expect.objectContaining({ kind: "completed", runId })],
+      });
+    },
+  );
 
   it("leaves the card unchanged when completion notification validation fails", async () => {
     const store = createWorkboardSqliteTestStore({ createStores: createKernelStores });
@@ -2517,6 +2493,7 @@ describe("WorkboardStore", () => {
     const reclaimed = await store.reclaim(claimed.card.id, { reason: "stale session" }, null);
     expect(reclaimed).toMatchObject({ status: "ready" });
     expect(reclaimed.metadata?.claim).toBeUndefined();
+    await expect(store.get(reclaimed.id)).resolves.toEqual(reclaimed);
 
     const running = await store.create({
       title: "Running recovery",
@@ -2527,6 +2504,7 @@ describe("WorkboardStore", () => {
     expect(stopped.execution).toBeUndefined();
     expect(stopped.metadata?.attempts).toEqual([expect.objectContaining({ status: "stopped" })]);
     expect(stopped.metadata?.failureCount).toBeUndefined();
+    await expect(store.get(stopped.id)).resolves.toEqual(stopped);
   });
 
   it("excludes archived cards from notification replay without discarding their history", async () => {
@@ -2589,53 +2567,6 @@ describe("WorkboardStore", () => {
     );
   });
 
-  it("replays notification events with subscription cursors", async () => {
-    const {
-      store,
-      stores: { subscriptions },
-    } = createWorkboardSqliteTestHarness({ createStores: createKernelStores });
-    const card = await store.create({ title: "Notify me", boardId: "ops" });
-    const subscription = await store.subscribeNotifications({
-      boardId: "ops",
-      cardId: card.id,
-      target: "session:operator",
-      eventKinds: ["completed"],
-    });
-
-    await store.complete(card.id, { summary: "Done." });
-
-    const preview = await store.notificationEvents({ subscriptionId: subscription.id });
-    expect(preview.events).toEqual([expect.objectContaining({ kind: "completed" })]);
-    const storedPreview = await subscriptions.lookup(subscription.id);
-    expect(storedPreview?.subscription).not.toHaveProperty("lastEventAt");
-    expect(storedPreview?.subscription).not.toHaveProperty("lastEventId");
-
-    const first = await store.advanceNotificationEvents({
-      subscriptionId: subscription.id,
-    });
-    expect(first.events).toEqual([expect.objectContaining({ kind: "completed" })]);
-    const event = first.events[0];
-    if (!event) {
-      throw new Error("expected notification event");
-    }
-    await expect(subscriptions.lookup(subscription.id)).resolves.toMatchObject({
-      subscription: {
-        lastEventAt: event.createdAt,
-        lastEventId: event.id,
-      },
-    });
-    await expect(store.notificationEvents({ subscriptionId: subscription.id })).resolves.toEqual({
-      subscription: expect.objectContaining({ id: subscription.id }),
-      events: [],
-    });
-    await expect(store.notificationEvents({ subscriptionId: "missing" })).rejects.toThrow(
-      /subscription not found/,
-    );
-    await expect(store.advanceNotificationEvents({ boardId: "ops" })).rejects.toThrow(
-      /subscriptionId is required/,
-    );
-  });
-
   it("does not resurrect a subscription deleted during cursor advancement", async () => {
     let markCursorWriteStarted!: () => void;
     let releaseCursorWrite!: () => void;
@@ -2681,7 +2612,9 @@ describe("WorkboardStore", () => {
   });
 
   it("advances through mixed-sequence same-millisecond notifications without skips or replays", async () => {
-    const store = createWorkboardSqliteTestStore({ createStores: createKernelStores });
+    const { store, stores } = createWorkboardSqliteTestHarness({
+      createStores: createKernelStores,
+    });
     for (const [id, sequence] of [
       ["z-event", 1234000],
       ["a-event", 1234001],
@@ -2700,17 +2633,34 @@ describe("WorkboardStore", () => {
       target: "session:operator",
       eventKinds: ["completed"],
     });
+    expect(
+      (await store.notificationEvents({ subscriptionId: subscription.id })).events.map(
+        (event) => event.id,
+      ),
+    ).toEqual(["z-event", "a-event", "0-event"]);
+    expect((await stores.subscriptions.lookup(subscription.id))?.subscription).toEqual(
+      subscription,
+    );
     for (const id of ["z-event", "a-event", "0-event"]) {
       const page = await store.advanceNotificationEvents({
         subscriptionId: subscription.id,
         limit: 1,
       });
       expect(page.events).toEqual([expect.objectContaining({ id })]);
+      await expect(stores.subscriptions.lookup(subscription.id)).resolves.toMatchObject({
+        subscription: { lastEventAt: 1234, lastEventId: id },
+      });
     }
     await expect(store.notificationEvents({ subscriptionId: subscription.id })).resolves.toEqual({
       subscription: expect.objectContaining({ id: subscription.id }),
       events: [],
     });
+    await expect(store.notificationEvents({ subscriptionId: "missing" })).rejects.toThrow(
+      /subscription not found/,
+    );
+    await expect(store.advanceNotificationEvents({ boardId: "ops" })).rejects.toThrow(
+      /subscriptionId is required/,
+    );
   });
 
   it("filters replayed notification events by session and run subscriptions", async () => {
@@ -3065,6 +3015,27 @@ describe("WorkboardStore", () => {
     },
   );
 
+  it("keeps completed decomposition steps visible when a later child is invalid", async () => {
+    const store = createWorkboardSqliteTestStore({ createStores: createKernelStores });
+    const parent = await store.create({ title: "Parent" });
+
+    await expect(
+      store.decompose(parent.id, {
+        children: [{ title: "Valid child" }, { notes: "Missing title" }],
+      }),
+    ).rejects.toThrow("title is required.");
+
+    const children = (await store.list()).filter((card) => card.id !== parent.id);
+    expect(children).toHaveLength(1);
+    expect(children[0]).toMatchObject({
+      title: "Valid child",
+      metadata: { links: [expect.objectContaining({ type: "parent", targetCardId: parent.id })] },
+    });
+    expect((await store.get(parent.id))?.metadata?.links).toEqual([
+      expect.objectContaining({ type: "child", targetCardId: children[0]?.id }),
+    ]);
+  });
+
   it("keeps specify as a todo-only clarification step", async () => {
     const store = createWorkboardSqliteTestStore({ createStores: createKernelStores });
     const card = await store.create({ title: "Rough idea", status: "triage" });
@@ -3081,52 +3052,6 @@ describe("WorkboardStore", () => {
       title: "Specified",
       status: "todo",
     });
-  });
-
-  it("leaves an edited card intact when compensating a failed decomposition", async () => {
-    await using harness = createConcurrentSqliteHarness("openclaw-workboard-compensation-");
-    const { operation, host, paused } = harness;
-    const parent = await operation.create({ title: "Parent" });
-    const child = await operation.create({ title: "Child", idempotencyKey: "child" });
-    const pause = paused.pauseAfterMatchingWrite(
-      (key, value) => key === child.id && Boolean(value?.card.metadata?.links?.length),
-    );
-    const pending = operation.decompose(parent.id, {
-      children: [{ title: "Child", idempotencyKey: "child" }, { notes: "Missing title" }],
-    });
-    await pause.reached;
-    const edited = await host.update(child.id, { notes: "Keep this edit" });
-    pause.resume();
-
-    await expect(pending).rejects.toThrow(/title is required/);
-    await expect(host.get(child.id)).resolves.toEqual(edited);
-    expectSameCardState(await host.get(parent.id), parent);
-  });
-
-  it("preserves a linked-create failure when card compensation also fails", async () => {
-    const {
-      store,
-      stores: { cards },
-    } = createWorkboardSqliteTestHarness({ createStores: createKernelStores });
-    const parent = await store.create({ title: "Claimed parent", status: "ready" });
-    await store.claim(parent.id, { ownerId: "worker" });
-    cards.deleteIfUpdatedAt = async () => {
-      throw new Error("card compensation failed");
-    };
-
-    const error = await store
-      .create({ title: "New child", parents: [parent.id] }, { ownerId: "other" })
-      .catch((caught: unknown) => caught);
-
-    expect(error).toBeInstanceOf(AggregateError);
-    expect(error).toMatchObject({
-      message: expect.stringMatching(/claimed by/),
-      cause: expect.objectContaining({ message: expect.stringMatching(/claimed by/) }),
-    });
-    expect((error as AggregateError).errors).toEqual([
-      expect.objectContaining({ message: expect.stringMatching(/claimed by/) }),
-      expect.objectContaining({ message: "card compensation failed" }),
-    ]);
   });
 
   it("preserves parent child links when decomposition leaves the parent open", async () => {

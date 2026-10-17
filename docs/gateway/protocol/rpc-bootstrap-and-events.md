@@ -41,6 +41,34 @@ The row's own fields take precedence. Fields outside the sidebar projection are
 unrequested, not deletion receipts, just as with compact rows. Other clients can
 continue requesting compact or full rows without decoding shared facts.
 
+Sidebar replies include an opaque `rowsRevision`. A client can send it as
+`ifRowsRevision` on the same query to receive `rowsUnchanged: true` and an empty
+`sessions` array when the authorized rows are unchanged. Counts, defaults, and
+facets still describe the current full window.
+
+Clients that also accept row deltas send `ifRowsRevision: "delta:<revision>"`.
+When that query's previous row vector is still retained, `sessions` contains only
+changed or inserted rows, and `rowsDelta` contains `baseRevision` and `order`.
+Expand response-local shared facts, concatenate the cached base rows with those
+changed rows, then select the complete window by the integer indexes in `order`.
+Omitted base rows are removed; repeated raw keys across agents remain distinct. `count`
+still counts the complete window, including owner-first rows. Require a matching
+base revision before applying a delta. Revision misses, retired views, and reads
+without a useful delta return the normal full row array. Current authorization
+and selection always precede this comparison. The Gateway retains up to 32 prior
+vectors per bounded query view, including across runtime activity updates.
+Configuration, identity, and selection resets retire the view and its history.
+Views are retained in least-recently-used order, with limits of 512 cache slots
+(selection and row presentation use separate slots) and 32 MiB of estimated
+retention per projection. The estimate counts row/history references, selection
+and partition entries, query keys, and view overhead; it is not a heap-size limit
+for shared row objects or their encodings. A response exceeding the budget is
+served without retaining its baseline. Eviction does not change authorization
+or selection; a later read can return full rows to establish a new baseline.
+
+This mode is optional: bare revision tokens never receive deltas, and older
+Gateways treat the prefixed token as a miss and return full rows.
+
 Control UI list requests use a bounded diagnostic `source`:
 `sidebar`, `dashboard`, `activity`, `sessions-page`, `chat-pane`, `agent-roster`,
 `command-palette`, or `skill-workshop`.
@@ -163,6 +191,14 @@ updated. This is an additive protocol-v4 contract, with no capability negotiatio
 or protocol-version change.
 
 ## Common event families
+
+- `socket.drain`: session reset (`reset` or `new`) or deletion (`delete`) notice
+  for session-list and matching message subscribers. The payload includes
+  `sessionKey`, `reason`, `ts`, and, when available, `agentId` and `sessionId`.
+  It follows the same session access checks as other session events; clients
+  with `session-scoped-events` receive it only for their subscribed session.
+  This is a best-effort cache invalidation, not task completion, a WebSocket
+  transport drain, or a durable delivery receipt. Reconcile state after reconnects.
 
 - `chat`: UI chat updates such as `chat.inject` and other transcript-only chat
   events. A `state: "delta"` payload carries the append in `deltaText`.
@@ -347,7 +383,12 @@ or protocol-version change.
 - `tick`: periodic keepalive/liveness event.
 - `health`: gateway health snapshot update.
 - `heartbeat`: heartbeat event stream update.
-- `cron`: cron run/job change event.
+- `cron`: cron run/job change event with the changed job's identity and attention
+  state. The optional `job` contains `id`, `name`, `agentId`, `enabled`,
+  `updatedAtMs`, and the next/last run, running, and auto-disable fields in `state`.
+  Job definitions, run summaries, diagnostics, and delivery traces are omitted;
+  use `cron.get`, `cron.list`, or `cron.runs` when displaying those details.
+  Internal `cron_changed` plugin hooks still receive the full job snapshot.
 - `shutdown`: gateway shutdown notification.
 - `node.pair.requested` / `node.pair.resolved`: node pairing lifecycle.
 - `node.invoke.request`: node invoke request broadcast.

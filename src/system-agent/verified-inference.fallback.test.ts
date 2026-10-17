@@ -1,24 +1,13 @@
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import fs from "node:fs/promises";
+import { afterEach, expect, it } from "vitest";
+import { testing as cliBackendsTesting } from "../agents/cli-backends.test-support.js";
 import { readConfigFileSnapshot } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
-import { resolveSystemAgentConfiguredRouteFromConfig } from "./inference-route.js";
-import type { ActivateSetupInferenceDeps } from "./setup-inference-core.js";
-import { resolvePersistentApplyInference } from "./setup-inference-turn.js";
-import { installSystemAgentClaudeCliBackendTestFixture } from "./system-agent.test-helpers.js";
-import { createSystemAgentVerifiedInferenceBinding } from "./verified-inference.js";
-import {
-  cliRuntimeArtifactAuth,
-  cliRuntimeArtifactDeps,
-  pluginArtifactDeps,
-} from "./verified-inference.test-support.js";
+import { resolvePersistentApplyInference, verifySetupInference } from "./setup-inference-turn.js";
 
-let restoreCliBackend: () => void;
-beforeAll(() => {
-  restoreCliBackend = installSystemAgentClaudeCliBackendTestFixture();
-});
-afterAll(() => restoreCliBackend());
+afterEach(() => cliBackendsTesting.resetDepsForTest());
 const runtime: RuntimeEnv = {
   log() {},
   error() {},
@@ -29,8 +18,36 @@ const runtime: RuntimeEnv = {
 
 it("reprobes the same configured fallback for an opaque owner at persistent apply", async () => {
   await withOpenClawTestState({ label: "opaque-configured-fallback" }, async (state) => {
-    const fallbackModelRef = "claude-cli/claude-opus-5";
+    const callsPath = state.path("cli-calls.jsonl");
+    const script = await state.writeText(
+      "fixture-cli.mjs",
+      `import { appendFileSync } from "node:fs";
+appendFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)) + "\\n");
+process.stdout.write("OK\\n");
+`,
+    );
+    cliBackendsTesting.setDepsForTest({
+      resolveRuntimeCliBackends: () => [
+        {
+          id: "fixture-cli",
+          pluginId: "fixture",
+          nativeToolMode: "none",
+          sideQuestionToolMode: "disabled",
+          config: {
+            command: process.execPath,
+            args: [script, callsPath],
+            modelArg: "--model",
+            output: "text",
+            input: "arg",
+            sessionMode: "none",
+            systemPromptWhen: "never",
+          },
+        },
+      ],
+    });
+    const fallbackModelRef = "fixture-cli/second";
     const config: OpenClawConfig = {
+      plugins: { enabled: false },
       agents: {
         entries: {
           ops: {
@@ -42,50 +59,37 @@ it("reprobes the same configured fallback for an opaque owner at persistent appl
     await state.writeConfig(config);
     const readSnapshot = () =>
       readConfigFileSnapshot({ observe: false, pluginValidation: "core-only" });
-    const snapshot = await readSnapshot();
-    expect(snapshot.valid).toBe(true);
-    const route = await resolveSystemAgentConfiguredRouteFromConfig(snapshot.config, "ops", {
+    const result = await verifySetupInference({
+      agentId: "ops",
       fallbackModelRef,
+      bindSession: true,
+      runtime,
+      deps: { readConfigFileSnapshot: readSnapshot },
     });
-    if (!route || route.runner !== "cli") {
-      throw new Error("missing configured CLI fallback");
-    }
-    const auth = {
-      runtimeOwnerFingerprint: "opaque-fallback-owner",
-      runtimeOwnerKind: "cli-runtime" as const,
-      runtimeOwnerId: "claude-cli",
-      ...cliRuntimeArtifactAuth,
-    };
-    const deps = {
-      readConfigFileSnapshot: readSnapshot,
-      ...pluginArtifactDeps(),
-      ...cliRuntimeArtifactDeps(),
-      resolveCliRuntimeOwnerFingerprint: async () => auth.runtimeOwnerFingerprint,
-    };
-    const binding = await createSystemAgentVerifiedInferenceBinding({
-      configuredRoute: route,
-      executionRoute: route,
-      auth,
-      deps,
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.binding.auth).toMatchObject({
+      proofKind: "runtime-owner",
+      runtimeOwnerKind: "cli-runtime",
+      runtimeOwnerId: "fixture-cli",
     });
-    const runCliAgent = vi.fn<NonNullable<ActivateSetupInferenceDeps["runCliAgent"]>>(
-      async (input) => {
-        expect(input).toMatchObject({ provider: "claude-cli", model: "claude-opus-5" });
-        input.onSuccessfulAuthBinding?.(auth);
-        return {
-          meta: {
-            durationMs: 1,
-            finalAssistantVisibleText: "OK",
-            executionTrace: { winnerProvider: "claude-cli", winnerModel: "claude-opus-5" },
-          },
-        };
-      },
-    );
-    // The reprobe forwards these deps to the setup verifier, which owns runCliAgent.
-    const reprobeDeps = { ...deps, runCliAgent };
+    expect(result.binding.execution.fallbackModelRef).toBe(fallbackModelRef);
+    const readCalls = async (): Promise<unknown[]> =>
+      (await fs.readFile(callsPath, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+    expect(await readCalls()).toEqual([expect.arrayContaining(["--model", "second"])]);
     await expect(
-      resolvePersistentApplyInference({ binding, runtime, deps: reprobeDeps }),
-    ).resolves.toBe(binding.execution);
-    expect(runCliAgent).toHaveBeenCalledOnce();
+      resolvePersistentApplyInference({
+        binding: result.binding,
+        runtime,
+        deps: { readConfigFileSnapshot: readSnapshot },
+      }),
+    ).resolves.toBe(result.binding.execution);
+    expect(await readCalls()).toEqual([
+      expect.arrayContaining(["--model", "second"]),
+      expect.arrayContaining(["--model", "second"]),
+    ]);
   });
 });

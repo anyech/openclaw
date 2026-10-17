@@ -1,15 +1,14 @@
+import { createServer } from "node:http";
 import { expectDefined } from "@openclaw/normalization-core";
-import { describe, expect, it } from "vitest";
-import { fingerprintResolvedProviderAuth } from "../agents/execution-auth-binding.js";
-import { FailoverError } from "../agents/failover-error.js";
-import { resolveApiKeyForProviderCore } from "../agents/model-auth.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { readConfigFileSnapshot } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import { reserveTestPortListener } from "../test-utils/port-claims.js";
 import { verifySystemAgentInferenceWithFallback } from "./inference-fallback.js";
 import { resolveSystemAgentConfiguredRouteFromConfig } from "./inference-route.js";
-import type { ActivateSetupInferenceDeps } from "./setup-inference-core.js";
+import { resolveSetupInferenceWinnerError } from "./setup-inference-core.js";
 import { resolvePersistentApplyInference, verifySetupInference } from "./setup-inference-turn.js";
 import { resolveSystemAgentVerifiedInferenceRoute } from "./verified-inference.js";
 
@@ -24,9 +23,9 @@ const runtime: RuntimeEnv = {
 };
 
 function configuredChain(): OpenClawConfig {
-  const provider = (id: string) => ({
+  const provider = (providerId: string, id: string) => ({
     api: "openai-completions" as const,
-    baseUrl: "http://127.0.0.1:19998/v1",
+    baseUrl: `${fixtureBaseUrl}/${providerId}/v1`,
     apiKey: "fixture-key-not-a-credential",
     models: [
       {
@@ -53,7 +52,10 @@ function configuredChain(): OpenClawConfig {
       entries: { main: {} },
     },
     models: {
-      providers: { "fixture-primary": provider("first"), "fixture-backup": provider("second") },
+      providers: {
+        "fixture-primary": provider("fixture-primary", "first"),
+        "fixture-backup": provider("fixture-backup", "second"),
+      },
     },
   };
 }
@@ -61,62 +63,109 @@ function configuredChain(): OpenClawConfig {
 const readSnapshot = () =>
   readConfigFileSnapshot({ observe: false, pluginValidation: "core-only" });
 
-function probeFixture(
-  options: {
-    winner?: string;
-    winnerModel?: string;
-    primaryFailure?: "auth" | "format";
-    failedProfiles?: string[];
-    afterResponse?: () => Promise<void>;
-  } = {},
-) {
-  const attempts: Array<{ provider: string; model: string; profile?: string }> = [];
-  const runEmbeddedAgent: NonNullable<ActivateSetupInferenceDeps["runEmbeddedAgent"]> = async (
-    params,
-  ) => {
-    expect(params.modelFallbacksOverride).toEqual([]);
-    expect(params.authProfileStateMode).toBe("read-only");
-    const provider = params.provider!;
-    const model = params.model!;
-    attempts.push({ provider, model, profile: params.authProfileId });
-    if (
-      `${provider}/${model}` === primary ||
-      options.failedProfiles?.includes(params.authProfileId ?? "")
-    ) {
-      throw new FailoverError("Synthetic primary outage", {
-        reason: options.primaryFailure ?? "auth",
-      });
+type ProbeOptions = {
+  primaryFailure?: "auth" | "format";
+  failedProfiles?: string[];
+  afterResponse?: () => Promise<void>;
+};
+type ProbeAttempt = { provider: string; model: string; profile?: string };
+let fixtureBaseUrl: string;
+let activeProbe: { options: ProbeOptions; attempts: ProbeAttempt[] } | undefined;
+let releaseServer: (() => Promise<void>) | undefined;
+const profileByKey = new Map([
+  ["fixture-primary-key", "fixture-primary:pinned"],
+  ["fixture-backup-key", "fixture-backup:pinned"],
+  ["first-fixture-key", "fixture-backup:first"],
+  ["second-fixture-key", "fixture-third:second"],
+  ["third-fixture-key", "fixture-backup:third"],
+]);
+
+beforeAll(async () => {
+  const server = createServer(async (request, response) => {
+    try {
+      const fixture = expectDefined(activeProbe, "active inference HTTP fixture");
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (
+        !body ||
+        typeof body !== "object" ||
+        !("model" in body) ||
+        typeof body.model !== "string"
+      ) {
+        throw new Error("Inference fixture requires a model request");
+      }
+      const provider = new URL(request.url ?? "/", "http://localhost").pathname.split("/")[1];
+      if (!provider) throw new Error("Inference fixture requires a provider path");
+      const model = body.model;
+      const profile = profileByKey.get(
+        request.headers.authorization?.replace(/^Bearer /, "") ?? "",
+      );
+      fixture.attempts.push({ provider, model, ...(profile ? { profile } : {}) });
+      if (
+        `${provider}/${model}` === primary ||
+        fixture.options.failedProfiles?.includes(profile ?? "")
+      ) {
+        const status = fixture.options.primaryFailure === "format" ? 400 : 401;
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            error: {
+              message:
+                status === 400
+                  ? "Invalid request: model not supported"
+                  : "Synthetic primary credential rejected",
+              type: status === 400 ? "invalid_request_error" : "invalid_api_key",
+              code: status === 400 ? "model_not_supported" : "invalid_api_key",
+            },
+          }),
+        );
+        return;
+      }
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(
+        `data: ${JSON.stringify({
+          id: "fixture-probe",
+          object: "chat.completion.chunk",
+          model,
+          choices: [{ index: 0, delta: { role: "assistant", content: "OK" }, finish_reason: null }],
+        })}\n\n`,
+      );
+      await fixture.options.afterResponse?.();
+      response.end(
+        `data: ${JSON.stringify({
+          id: "fixture-probe",
+          object: "chat.completion.chunk",
+          model,
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        })}\n\ndata: [DONE]\n\n`,
+      );
+    } catch (error) {
+      response.statusCode = 500;
+      response.end(String(error));
     }
-    const auth = await resolveApiKeyForProviderCore({
-      provider,
-      cfg: params.config,
-      agentDir: params.agentDir,
-      modelId: model,
-      modelApi: "openai-completions",
-      ...(params.authProfileId
-        ? { profileId: params.authProfileId, lockedProfile: true }
-        : { allowAuthProfileFallback: false }),
-      secretSentinels: true,
-    });
-    params.onSuccessfulAuthBinding?.({
-      authFingerprint: fingerprintResolvedProviderAuth(auth),
-      ...(auth.profileId ? { authProfileId: auth.profileId } : {}),
-      agentHarnessId: "openclaw",
-      modelId: model,
-      modelApi: "openai-completions",
-    });
-    await options.afterResponse?.();
-    return {
-      meta: {
-        durationMs: 1,
-        finalAssistantVisibleText: "OK",
-        executionTrace: {
-          winnerProvider: options.winner ?? provider,
-          winnerModel: options.winnerModel ?? model,
-        },
-      },
-    };
+  });
+  const reservation = await reserveTestPortListener({ offsets: [0], createListener: () => server });
+  fixtureBaseUrl = `http://127.0.0.1:${reservation.claim.port}`;
+  releaseServer = async () => {
+    server.closeAllConnections();
+    try {
+      await reservation.releaseListener();
+    } finally {
+      await reservation.claim.release();
+    }
   };
+});
+afterEach(() => {
+  activeProbe = undefined;
+});
+afterAll(async () => {
+  await releaseServer?.();
+});
+
+function probeFixture(options: ProbeOptions = {}) {
+  const attempts: ProbeAttempt[] = [];
+  activeProbe = { options, attempts };
   return {
     attempts,
     readConfig: async () => {
@@ -129,11 +178,7 @@ function probeFixture(
       bindSession: true;
       agentId: string;
       fallbackModelRef?: string;
-    }) =>
-      verifySetupInference({
-        ...params,
-        deps: { runEmbeddedAgent, readConfigFileSnapshot: readSnapshot },
-      }),
+    }) => verifySetupInference({ ...params, deps: { readConfigFileSnapshot: readSnapshot } }),
   };
 }
 
@@ -281,6 +326,7 @@ describe("bound maintenance configured model fallbacks", () => {
       );
       config.models!.providers!["fixture-third"] = {
         ...provider,
+        baseUrl: `${fixtureBaseUrl}/fixture-third/v1`,
         models: [
           {
             ...expectDefined(provider.models[0], "backup model"),
@@ -377,29 +423,24 @@ describe("bound maintenance configured model fallbacks", () => {
   });
 
   it.each(["provider", "model"] as const)(
-    "rejects an unknown winner %s without trying another candidate",
+    "rejects runner metadata reporting an unknown winner %s",
     async (identity) => {
-      await withOpenClawTestState({ label: "fallback-unknown-winner" }, async (state) => {
-        const config = configuredChain();
-        config.agents!.defaults!.model = { primary, fallbacks: [backup, "fixture-primary/other"] };
-        await state.writeConfig(config);
-        const fixture = probeFixture(
-          identity === "provider"
-            ? { winner: "unexpected-provider" }
-            : { winnerModel: "unexpected-model" },
-        );
-        const result = await verifySystemAgentInferenceWithFallback({
-          requestingAgentId: "main",
-          runtime,
-          deps: { readConfig: fixture.readConfig, verify: fixture.verify },
-        });
-        expect(result).toMatchObject({ ok: false, status: "unknown" });
-        expect(fixture.attempts).toHaveLength(2);
+      const route = await resolveSystemAgentConfiguredRouteFromConfig(configuredChain(), "main");
+      if (!route) throw new Error("missing configured inference route");
+      const error = await resolveSetupInferenceWinnerError(route, {
+        meta: {
+          durationMs: 0,
+          executionTrace: {
+            winnerProvider: identity === "provider" ? "unexpected-provider" : route.provider,
+            winnerModel: identity === "model" ? "unexpected-model" : route.model,
+          },
+        },
       });
+      expect(error).toContain("instead of the requested fixture-primary/first");
     },
   );
 
-  it("does not retry after successful-response credential drift", async () => {
+  it("does not retry when credentials change during a successful response", async () => {
     await withOpenClawTestState({ label: "fallback-probe-drift" }, async (state) => {
       const config = configuredChain();
       await state.writeConfig(config);

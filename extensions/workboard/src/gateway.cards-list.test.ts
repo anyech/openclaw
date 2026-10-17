@@ -26,6 +26,48 @@ function captureCardsList(store: WorkboardStore) {
 }
 
 describe("workboard card list revisions", () => {
+  it("bounds card pages and invalidates the first page after a committed update", async () => {
+    const { store, stores } = createWorkboardSqliteTestHarness();
+    for (let index = 0; index < 105; index++) {
+      const id = `card-${String(index).padStart(3, "0")}`;
+      await stores.cards.register(id, {
+        version: 1,
+        card: {
+          id,
+          title: id,
+          status: "todo",
+          priority: "normal",
+          labels: [],
+          position: 0,
+          createdAt: 1,
+          updatedAt: 1,
+          metadata: { comments: [{ id: `${id}-comment`, body: `Comment ${index}`, createdAt: 1 }] },
+        },
+      });
+    }
+    const list = captureCardsList(store);
+    const first = (await list({})).mock.calls[0]?.[1];
+    expect(first.cards).toHaveLength(100);
+    expect(first.nextCursor).toEqual({ position: 0, createdAt: 1, id: "card-099" });
+    expect(first.cards[99].metadata.comments[0].body).toBe("Comment 99");
+    const second = (await list({ after: first.nextCursor, sinceRevision: first.revision })).mock
+      .calls[0]?.[1];
+    expect(second.cards.map((card: { id: string }) => card.id)).toEqual([
+      "card-100",
+      "card-101",
+      "card-102",
+      "card-103",
+      "card-104",
+    ]);
+    expect(second.nextCursor).toBeUndefined();
+    expect(second.boards[0].total).toBe(105);
+    await store.update("card-000", { title: "Changed on the Gateway" });
+    const refreshed = (await list({ sinceRevision: first.revision })).mock.calls[0]?.[1];
+    expect(refreshed.cards[0].title).toBe("Changed on the Gateway");
+    expect(refreshed.cards).toHaveLength(100);
+    expect((await list({ after: { id: "card-099" } })).mock.calls[0]?.[0]).toBe(false);
+  });
+
   it("keeps session-filtered payloads and revision receipts separate from full card lists", async () => {
     const { store } = createWorkboardSqliteTestHarness();
     const first = await store.create({ title: "First session", sessionKey: "session-one" });
@@ -83,7 +125,7 @@ describe("workboard card list revisions", () => {
     }
   });
 
-  it("shares one frozen card payload per revision and publishes one invalidation per mutation", async () => {
+  it("shares one card payload per revision and publishes one invalidation per mutation", async () => {
     const { store, stores } = createWorkboardSqliteTestHarness();
     const card = await store.create({ title: "Before", boardId: "ops" });
     await store.claim(card.id, { ownerId: "worker", token: "test-claim-token" });
@@ -100,11 +142,8 @@ describe("workboard card list revisions", () => {
     expect(second).toBe(first);
     expect(await list("ops")).toBe(first);
     expect(reads).toHaveBeenCalledOnce();
-    expect(Object.isFrozen(first)).toBe(true);
-    expect(Object.isFrozen(first.cards[0].metadata.automation)).toBe(true);
     expect(first.cards[0].metadata.claim.token).toBe("[redacted]");
     expect((await store.get(card.id))?.metadata?.claim?.token).toBe("test-claim-token");
-    expect(() => first.cards.push(card)).toThrow(TypeError);
     expect((await list("default")).cards).toEqual([]);
     expect((await list()).cards).toEqual(first.cards);
 

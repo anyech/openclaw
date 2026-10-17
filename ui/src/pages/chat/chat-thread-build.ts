@@ -103,6 +103,8 @@ export type BuildChatItemsProps = ChatInputPlacementProps & {
   persistCommentary?: boolean;
   /** True while the agent is visibly working (isChatRunWorking). */
   runWorking?: boolean;
+  /** The answer is visible or the runtime only owns background settlement. */
+  runFinalizing?: boolean;
   /** True while the current session has an abortable live run. */
   runActive?: boolean;
   /** Set while a run that handed off is idle and its subagents are still running. */
@@ -183,7 +185,7 @@ export function buildChatItems(
   );
   const searchFiltering = props.searchOpen === true && Boolean(props.searchQuery?.trim());
   const hiddenHistoryKeys = new Set<string>();
-  const persistedCanvasIdentities = new Set<string>();
+  const canvasIdentities = new Set<string>();
   const normalizedHistory = history.map(safeNormalizeMessage);
   const permissionInMessage = (message: unknown) =>
     extractToolCardsCached(message).some((card) =>
@@ -235,6 +237,7 @@ export function buildChatItems(
       items.push({
         kind: "divider",
         key: `divider:model-fallback:${itemKey}`,
+        systemEvent: "info",
         label: t(
           fallback.phase === "restored"
             ? "chat.composer.modelRestoredEvent"
@@ -287,10 +290,12 @@ export function buildChatItems(
 
     const isToolResult = normalized.role.toLowerCase() === "toolresult";
     const persistedCanvasSource = isToolResult ? extractChatMessagePreview(msg) : null;
+    let duplicatePersistedCanvas = false;
     if (persistedCanvasSource) {
       const identity = canvasPreviewBaseIdentity(msg, persistedCanvasSource);
       if (identity) {
-        persistedCanvasIdentities.add(identity);
+        duplicatePersistedCanvas = canvasIdentities.has(identity);
+        canvasIdentities.add(identity);
       }
     }
     const matchingCanvas =
@@ -309,6 +314,7 @@ export function buildChatItems(
     }
     const renderPersistedPreview =
       persistedCanvasSource != null &&
+      !duplicatePersistedCanvas &&
       !matchingCanvas &&
       (!searchFiltering || canvasTurns[i]!.lastMatchingAssistantIndex > i);
     if (persistedCanvasSource && renderPersistedPreview) {
@@ -389,8 +395,11 @@ export function buildChatItems(
       continue;
     }
     const baseIdentity = canvasPreviewBaseIdentity(projection.item.message, preview);
-    if (baseIdentity && persistedCanvasIdentities.has(baseIdentity)) {
-      continue;
+    if (baseIdentity) {
+      if (canvasIdentities.has(baseIdentity)) {
+        continue;
+      }
+      canvasIdentities.add(baseIdentity);
     }
     const canvasBounds = boundToPendingInputs(
       resolveRunBounds(
@@ -643,6 +652,7 @@ export function buildChatItems(
   // catches up.
   const hasEmptyLiveStream = props.stream !== null && props.stream.trim().length === 0;
   const showWorkingIndicator =
+    !props.runFinalizing &&
     (!compaction || compaction.phase === "complete") &&
     ((props.runWorking === true && !initialHistoryLoad) ||
       hasEmptyLiveStream ||
@@ -722,9 +732,10 @@ export function buildChatItems(
   const projectYields = (source: ChatItem[], complete?: ChatItem[]) =>
     projectSessionsYieldItems(source, props.showToolCalls, complete);
   const complete = hidden ? projectYields(coalesceToolActivityMessages(items)) : undefined;
-  return groupMessages(projectYields(coalesceToolActivityMessages(items, hidden), complete), {
-    items: complete,
-    people: props.replyPeople,
-    localPerson: props.replyLocalPerson,
-  });
+  return groupMessages(
+    projectYields(coalesceToolActivityMessages(items, hidden), complete),
+    { items: complete, people: props.replyPeople, localPerson: props.replyLocalPerson },
+    props.showReasoning ? props.reasoning : undefined,
+    props.showReasoning,
+  );
 }

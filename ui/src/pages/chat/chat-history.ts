@@ -118,7 +118,6 @@ export async function loadChatHistory(
     sessionKey,
     requestAgentId,
     method,
-    deltaCursor,
     inputRunIds,
     requestKeyPrefix,
   ).then((result) => {
@@ -222,13 +221,16 @@ export type ChatEventPayload = {
   agentId?: string;
   state: "status" | "delta" | "final" | "aborted" | "error";
   phase?: ChatRunStartupPhase;
+  waitReason?: "response" | "slot";
   retry?: NonNullable<Extract<ChatEvent, { state: "status" }>["retry"]>;
   message?: unknown;
   deltaText?: string;
   replace?: boolean;
   errorMessage?: string;
+  suppressErrorNotice?: boolean;
   errorKind?: Extract<ChatEvent, { state: "error" }>["errorKind"];
   errorDetail?: ChatErrorDetail;
   stopReason?: string;
+  localModelMayStillBeFinishing?: boolean;
   yielded?: true;
 };
