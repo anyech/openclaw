@@ -1,6 +1,7 @@
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { resolveAmbientOwnerAgentId } from "../agents/agent-scope-config.js";
 import { listAgentIds } from "../agents/agent-scope.js";
+import { CliExecutionAuthProfileError } from "../agents/cli-execution-auth.js";
 import { hasAvailableAuthForProvider } from "../agents/model-auth.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { RuntimeEnv } from "../runtime.js";
@@ -128,38 +129,43 @@ export async function verifySystemAgentInferenceWithFallback(
           ),
         )
       ).flat()
-    : (
-        await Promise.all(
-          orderedOwners.map(async (owner) => {
-            if (owner.route.modelTarget === "utility") {
-              return [owner];
-            }
-            const provider = owner.route.modelLabel.slice(0, owner.route.modelLabel.indexOf("/"));
-            const refs = await resolveSystemAgentConfiguredFallbackRefs(config, owner.agentId, {
-              provider,
-              model: owner.route.model,
-            });
-            const candidates = [owner];
-            for (const ref of refs) {
-              const route = await resolveRoute(config, owner.agentId, ref);
-              if (route) {
-                candidates.push({
-                  agentId: owner.agentId,
-                  provider: normalizeProviderId(route.provider),
-                  route,
-                });
+    : (async function* () {
+        for (const owner of orderedOwners) {
+          yield owner;
+          if (owner.route.modelTarget === "utility") {
+            continue;
+          }
+          const provider = owner.route.modelLabel.slice(0, owner.route.modelLabel.indexOf("/"));
+          const refs = await resolveSystemAgentConfiguredFallbackRefs(config, owner.agentId, {
+            provider,
+            model: owner.route.model,
+          });
+          for (const ref of refs) {
+            let route: SystemAgentConfiguredRoute | null;
+            try {
+              route = await resolveRoute(config, owner.agentId, ref);
+            } catch (error) {
+              if (error instanceof CliExecutionAuthProfileError) {
+                continue;
               }
+              throw error;
             }
-            return candidates;
-          }),
-        )
-      ).flat();
+            if (route) {
+              yield {
+                agentId: owner.agentId,
+                provider: normalizeProviderId(route.provider),
+                route,
+              };
+            }
+          }
+        }
+      })();
   const hasAuth = deps.hasAuth ?? hasAvailableAuthForProvider;
   const verify = deps.verify ?? verifySetupInference;
   let lastFailure: Extract<VerifySetupInferenceResult, { ok: false }> | undefined;
   const failedProviders = new Set<string>();
   const attemptedOwners = new Set<string>();
-  for (const candidate of ordered) {
+  for await (const candidate of ordered) {
     if (failedProviders.has(candidate.provider)) {
       continue;
     }

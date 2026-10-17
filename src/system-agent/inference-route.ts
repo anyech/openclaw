@@ -259,7 +259,7 @@ export async function resolveSystemAgentConfiguredRouteFromConfig(
   const authProfileId = allowCliAuthProfileForwarding ? cliAuthProfileId : selection.profileId;
   const executionConfig = projectSystemAgentExecutionConfig(preparedConfig, modelOwnerAgentId);
   const modelLabel = modelSelection.resolveConfiguredRouteModelLabel({
-    configuredRef: configuredSelection.modelRef,
+    configuredRef: deps.fallbackModelRef ?? configuredSelection.modelRef,
     resolved: { provider: selection.provider, model: selection.modelId },
     ...(selection.profileId ? { profileId: selection.profileId } : {}),
   });

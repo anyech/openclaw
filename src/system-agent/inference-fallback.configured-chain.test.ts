@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { readConfigFileSnapshot } from "../config/config.js";
+import { captureRuntimeConfigAsyncReader, readConfigFileSnapshot } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
@@ -10,6 +10,7 @@ import { verifySystemAgentInferenceWithFallback } from "./inference-fallback.js"
 import { resolveSystemAgentConfiguredRouteFromConfig } from "./inference-route.js";
 import { resolveSetupInferenceWinnerError } from "./setup-inference-core.js";
 import { resolvePersistentApplyInference, verifySetupInference } from "./setup-inference-turn.js";
+import { installSystemAgentClaudeCliBackendTestFixture } from "./system-agent.test-helpers.js";
 import { resolveSystemAgentVerifiedInferenceRoute } from "./verified-inference.js";
 
 const primary = "fixture-primary/first";
@@ -64,6 +65,7 @@ const readSnapshot = () =>
   readConfigFileSnapshot({ observe: false, pluginValidation: "core-only" });
 
 type ProbeOptions = {
+  primarySuccess?: boolean;
   primaryFailure?: "auth" | "format";
   failedProfiles?: string[];
   afterResponse?: () => Promise<void>;
@@ -103,7 +105,7 @@ beforeAll(async () => {
       );
       fixture.attempts.push({ provider, model, ...(profile ? { profile } : {}) });
       if (
-        `${provider}/${model}` === primary ||
+        (`${provider}/${model}` === primary && !fixture.options.primarySuccess) ||
         fixture.options.failedProfiles?.includes(profile ?? "")
       ) {
         const status = fixture.options.primaryFailure === "format" ? 400 : 401;
@@ -173,16 +175,103 @@ function probeFixture(options: ProbeOptions = {}) {
       expect(snapshot.valid, JSON.stringify(snapshot.issues)).toBe(true);
       return snapshot.runtimeConfig ?? snapshot.config;
     },
-    verify: (params: {
+    verify: async (params: {
       runtime: RuntimeEnv;
       bindSession: true;
       agentId: string;
       fallbackModelRef?: string;
-    }) => verifySetupInference({ ...params, deps: { readConfigFileSnapshot: readSnapshot } }),
+    }) => {
+      await captureRuntimeConfigAsyncReader()();
+      return await verifySetupInference({
+        ...params,
+        deps: { readConfigFileSnapshot: readSnapshot },
+      });
+    },
   };
 }
 
 describe("bound maintenance configured model fallbacks", () => {
+  it("keeps a healthy primary when an optional CLI fallback profile is missing", async () => {
+    const restoreCliBackend = installSystemAgentClaudeCliBackendTestFixture();
+    try {
+      await withOpenClawTestState(
+        { label: "healthy-primary-missing-fallback-profile" },
+        async (state) => {
+          const config = configuredChain();
+          config.agents!.defaults!.model = {
+            primary,
+            fallbacks: ["claude-cli/claude-opus-5@missing-profile"],
+          };
+          await state.writeConfig(config);
+          const fixture = probeFixture({ primarySuccess: true });
+          const result = await verifySystemAgentInferenceWithFallback({
+            requestingAgentId: "main",
+            runtime,
+            deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+          });
+          expect(result.ok, JSON.stringify(result)).toBe(true);
+          if (!result.ok) throw new Error(result.error);
+          expect(result.binding.configuredRoute).toMatchObject({
+            agentId: "main",
+            provider: "fixture-primary",
+            model: "first",
+          });
+          expect(result.binding.execution).toMatchObject({
+            agentId: "main",
+            provider: "fixture-primary",
+            model: "first",
+          });
+          expect(fixture.attempts).toEqual([{ provider: "fixture-primary", model: "first" }]);
+        },
+      );
+    } finally {
+      restoreCliBackend();
+    }
+  });
+
+  it("skips a missing CLI fallback profile after the primary fails", async () => {
+    const restoreCliBackend = installSystemAgentClaudeCliBackendTestFixture();
+    try {
+      await withOpenClawTestState(
+        { label: "failed-primary-missing-fallback-profile" },
+        async (state) => {
+          const config = configuredChain();
+          config.agents!.defaults!.model = {
+            primary,
+            fallbacks: ["claude-cli/claude-opus-5@missing-profile", backup],
+          };
+          await state.writeConfig(config);
+          const fixture = probeFixture();
+          const result = await verifySystemAgentInferenceWithFallback({
+            requestingAgentId: "main",
+            runtime,
+            deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+          });
+          expect(result.ok, JSON.stringify(result)).toBe(true);
+          if (!result.ok) throw new Error(result.error);
+          expect(result.binding.configuredRoute).toMatchObject({
+            agentId: "main",
+            fallbackModelRef: backup,
+            provider: "fixture-backup",
+            model: "second",
+          });
+          expect(result.binding.execution).toMatchObject({
+            agentId: "main",
+            fallbackModelRef: backup,
+            provider: "fixture-backup",
+            model: "second",
+          });
+          expect(fixture.attempts).toEqual([
+            { provider: "fixture-primary", model: "first" },
+            { provider: "fixture-backup", model: "second" },
+          ]);
+        },
+      );
+    } finally {
+      restoreCliBackend();
+    }
+  });
+
   it.each(["defaults", "agent"] as const)(
     "binds and revalidates the successful %s fallback under the original owner",
     async (scope) => {

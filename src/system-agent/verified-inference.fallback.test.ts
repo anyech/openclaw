@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import { afterEach, expect, it } from "vitest";
 import { testing as cliBackendsTesting } from "../agents/cli-backends.test-support.js";
-import { readConfigFileSnapshot } from "../config/config.js";
+import { captureRuntimeConfigAsyncReader, readConfigFileSnapshot } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
@@ -19,13 +19,21 @@ const runtime: RuntimeEnv = {
 it("reprobes the same configured fallback for an opaque owner at persistent apply", async () => {
   await withOpenClawTestState({ label: "opaque-configured-fallback" }, async (state) => {
     const callsPath = state.path("cli-calls.jsonl");
+    const interpreter = await fs.realpath(process.execPath);
+    await state.writeJson("fixture-cli/package.json", {
+      name: "@fixture/verified-fallback-cli",
+      version: "1.0.0",
+      type: "module",
+    });
     const script = await state.writeText(
-      "fixture-cli.mjs",
-      `import { appendFileSync } from "node:fs";
+      "fixture-cli/cli.mjs",
+      `#!${interpreter}
+import { appendFileSync } from "node:fs";
 appendFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)) + "\\n");
 process.stdout.write("OK\\n");
 `,
     );
+    await fs.chmod(script, 0o755);
     cliBackendsTesting.setDepsForTest({
       resolveRuntimeCliBackends: () => [
         {
@@ -33,9 +41,14 @@ process.stdout.write("OK\\n");
           pluginId: "fixture",
           nativeToolMode: "none",
           sideQuestionToolMode: "disabled",
+          runtimeArtifact: {
+            kind: "bundled-package-tree",
+            packageName: "@fixture/verified-fallback-cli",
+            entrypoint: "command",
+          },
           config: {
-            command: process.execPath,
-            args: [script, callsPath],
+            command: script,
+            args: [callsPath],
             modelArg: "--model",
             output: "text",
             input: "arg",
@@ -59,6 +72,7 @@ process.stdout.write("OK\\n");
     await state.writeConfig(config);
     const readSnapshot = () =>
       readConfigFileSnapshot({ observe: false, pluginValidation: "core-only" });
+    await captureRuntimeConfigAsyncReader()();
     const result = await verifySetupInference({
       agentId: "ops",
       fallbackModelRef,
@@ -80,6 +94,7 @@ process.stdout.write("OK\\n");
         .split("\n")
         .map((line) => JSON.parse(line));
     expect(await readCalls()).toEqual([expect.arrayContaining(["--model", "second"])]);
+    await captureRuntimeConfigAsyncReader()();
     await expect(
       resolvePersistentApplyInference({
         binding: result.binding,
