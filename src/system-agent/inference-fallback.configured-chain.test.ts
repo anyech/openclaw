@@ -83,11 +83,13 @@ const profileByKey = new Map([
 ]);
 
 beforeAll(async () => {
-  const server = createServer(async (request, response) => {
-    try {
+  const server = createServer((request, response) => {
+    const respond = async () => {
       const fixture = expectDefined(activeProbe, "active inference HTTP fixture");
       const chunks: Buffer[] = [];
-      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      for await (const chunk of request) {
+        chunks.push(Buffer.from(chunk));
+      }
       const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       if (
         !body ||
@@ -98,7 +100,9 @@ beforeAll(async () => {
         throw new Error("Inference fixture requires a model request");
       }
       const provider = new URL(request.url ?? "/", "http://localhost").pathname.split("/")[1];
-      if (!provider) throw new Error("Inference fixture requires a provider path");
+      if (!provider) {
+        throw new Error("Inference fixture requires a provider path");
+      }
       const model = body.model;
       const profile = profileByKey.get(
         request.headers.authorization?.replace(/^Bearer /, "") ?? "",
@@ -142,10 +146,11 @@ beforeAll(async () => {
           choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
         })}\n\ndata: [DONE]\n\n`,
       );
-    } catch (error) {
+    };
+    void respond().catch((error: unknown) => {
       response.statusCode = 500;
       response.end(String(error));
-    }
+    });
   });
   const reservation = await reserveTestPortListener({ offsets: [0], createListener: () => server });
   fixtureBaseUrl = `http://127.0.0.1:${reservation.claim.port}`;
@@ -210,7 +215,9 @@ describe("bound maintenance configured model fallbacks", () => {
             deps: { readConfig: fixture.readConfig, verify: fixture.verify },
           });
           expect(result.ok, JSON.stringify(result)).toBe(true);
-          if (!result.ok) throw new Error(result.error);
+          if (!result.ok) {
+            throw new Error(result.error);
+          }
           expect(result.binding.configuredRoute).toMatchObject({
             agentId: "main",
             provider: "fixture-primary",
@@ -248,7 +255,9 @@ describe("bound maintenance configured model fallbacks", () => {
             deps: { readConfig: fixture.readConfig, verify: fixture.verify },
           });
           expect(result.ok, JSON.stringify(result)).toBe(true);
-          if (!result.ok) throw new Error(result.error);
+          if (!result.ok) {
+            throw new Error(result.error);
+          }
           expect(result.binding.configuredRoute).toMatchObject({
             agentId: "main",
             fallbackModelRef: backup,
@@ -515,7 +524,9 @@ describe("bound maintenance configured model fallbacks", () => {
     "rejects runner metadata reporting an unknown winner %s",
     async (identity) => {
       const route = await resolveSystemAgentConfiguredRouteFromConfig(configuredChain(), "main");
-      if (!route) throw new Error("missing configured inference route");
+      if (!route) {
+        throw new Error("missing configured inference route");
+      }
       const error = await resolveSetupInferenceWinnerError(route, {
         meta: {
           durationMs: 0,

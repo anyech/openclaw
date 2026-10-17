@@ -81,7 +81,9 @@ process.stdout.write("OK\\n");
       deps: { readConfigFileSnapshot: readSnapshot },
     });
     expect(result.ok, JSON.stringify(result)).toBe(true);
-    if (!result.ok) throw new Error(result.error);
+    if (!result.ok) {
+      throw new Error(result.error);
+    }
     expect(result.binding.auth).toMatchObject({
       proofKind: "runtime-owner",
       runtimeOwnerKind: "cli-runtime",
