@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -529,7 +530,6 @@ describe("bound maintenance configured model fallbacks", () => {
       }
       const error = await resolveSetupInferenceWinnerError(route, {
         meta: {
-          durationMs: 0,
           executionTrace: {
             winnerProvider: identity === "provider" ? "unexpected-provider" : route.provider,
             winnerModel: identity === "model" ? "unexpected-model" : route.model,
@@ -616,6 +616,67 @@ describe("bound maintenance configured model fallbacks", () => {
           await resolvePersistentApplyInference({ binding: result.binding, runtime }),
         ).toBeNull();
         expect(fixture.attempts).toHaveLength(2);
+      });
+    },
+  );
+
+  it.each(["unchanged", "removed", "credential"] as const)(
+    "checks fallback ownership at the config commit with %s authority",
+    async (change) => {
+      await withOpenClawTestState({ label: "fallback-config-commit" }, async (state) => {
+        const config = configuredChain();
+        await state.writeConfig(config);
+        const fixture = probeFixture();
+        const result = await verifySystemAgentInferenceWithFallback({
+          requestingAgentId: "main",
+          runtime,
+          deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+        });
+        if (!result.ok) {
+          throw new Error(result.error);
+        }
+        const { SystemAgentChatEngine } = await import("./chat-engine.js");
+        const engine = new SystemAgentChatEngine({
+          verifiedInference: result.binding,
+          runAgentTurn: async () => null,
+          deps: { readConfigFileSnapshot: readSnapshot },
+        });
+        let authorityChanged = false;
+        try {
+          engine.propose({
+            kind: "config-set",
+            path: "agents.defaults.thinkingDefault",
+            value: '"low"',
+          });
+          const proposal = expectDefined(engine.getPendingOperatorProposal(), "approved proposal");
+          const reply = await engine.resolveOperatorApproval("allow-once", proposal.hash, () => {
+            if (authorityChanged || change === "unchanged") {
+              return;
+            }
+            authorityChanged = true;
+            if (change === "removed") {
+              expectDefined(config.agents?.defaults, "fixture agent defaults").model = {
+                primary,
+                fallbacks: [],
+              };
+            } else {
+              expectDefined(
+                config.models?.providers?.["fixture-backup"],
+                "fixture backup provider",
+              ).apiKey = "reassigned-fixture-key";
+            }
+            // An independent config writer can change the route after the chat
+            // admission check and before this operation loads its write snapshot.
+            writeFileSync(state.configPath, JSON.stringify(config));
+          });
+          const persisted = await readSnapshot();
+          expect(persisted.config.agents?.defaults?.thinkingDefault).toBe(
+            change === "unchanged" ? "low" : undefined,
+          );
+          expect(reply?.applied).toBe(change === "unchanged");
+        } finally {
+          await engine.dispose();
+        }
       });
     },
   );

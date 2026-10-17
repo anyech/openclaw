@@ -238,6 +238,7 @@ export async function runConfigOperations(params: {
   successMode: "set" | "patch";
   currentExpectation?: ConfigSetCurrentExpectation;
   beforePersistentApply?: () => void;
+  beforeCommit?: () => Promise<void>;
 }) {
   const { runtime, operations, options } = params;
   if (
@@ -550,6 +551,14 @@ export async function runConfigOperations(params: {
     writeOptions: {
       ...mutationStart.writeOptions,
       auditOrigin: "cli",
+      ...(params.beforeCommit
+        ? {
+            beforeCommit: async () => {
+              await mutationStart.writeOptions.beforeCommit?.();
+              await params.beforeCommit?.();
+            },
+          }
+        : {}),
       ...(assertCurrentExpectation || params.beforePersistentApply
         ? {
             assertConfigPathForWrite: () => {

@@ -78,6 +78,7 @@ export async function runConfigSet(opts: {
   cliOptions: ConfigSetOptions;
   runtime?: RuntimeEnv;
   beforePersistentApply?: () => void;
+  beforeCommit?: () => Promise<void>;
   /** Embedded recovery needs the writer's typed postcommit/rollback outcome. */
   throwOnError?: boolean;
 }) {
@@ -99,6 +100,7 @@ export async function runConfigSet(opts: {
         ...(opts.beforePersistentApply
           ? { beforePersistentApply: opts.beforePersistentApply }
           : {}),
+        ...(opts.beforeCommit ? { beforeCommit: opts.beforeCommit } : {}),
       };
     },
     Boolean(opts.cliOptions.dryRun && opts.cliOptions.json),
@@ -203,6 +205,7 @@ export async function runConfigUnset(opts: {
   cliOptions?: ConfigUnsetOptions;
   runtime?: RuntimeEnv;
   beforePersistentApply?: () => void;
+  beforeCommit?: () => Promise<void>;
 }) {
   const cliOptions = opts.cliOptions ?? {};
   return runConfigMutation({ ...opts, cliOptions }, async () => {
@@ -218,6 +221,7 @@ export async function runConfigUnset(opts: {
       operations: [buildUnsetOperation(pathTokens.map(String), pathTokens)],
       successMode: "set",
       ...(opts.beforePersistentApply ? { beforePersistentApply: opts.beforePersistentApply } : {}),
+      ...(opts.beforeCommit ? { beforeCommit: opts.beforeCommit } : {}),
     };
   });
 }
