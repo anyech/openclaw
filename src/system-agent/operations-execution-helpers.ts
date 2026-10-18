@@ -202,7 +202,7 @@ export type ExecuteOptions = {
    * immediately followed by the persistent effect it authorizes.
    */
   beforePersistentApply?: () => void;
-  /** Revalidate inference after config preparation and before publication. */
+  /** Revalidate inference before secret persistence and final config publication. */
   beforeConfigCommit?: () => Promise<void>;
   /** Adopt the exact final binding after a verified model-route write commits. */
   onVerifiedInferenceChanged?: (binding: SystemAgentVerifiedInferenceBinding) => void;
@@ -342,15 +342,17 @@ export async function runConfigSetOperation(params: {
   // Every save gets a fresh entry and no entry is ever overwritten or deleted
   // here: another config key or auth profile may use, or start using, any
   // entry at any time. The new ref is picked up by the normal config reload.
-  const storeEntry = await ctx.commit(() =>
-    writeSecretStoreEntryForConfigRef({
+  // Saving the secret is a persistent effect even if publishing its ref later fails.
+  const storeEntry = await ctx.commit(async () => {
+    await ctx.beforeConfigCommit?.();
+    return await writeSecretStoreEntryForConfigRef({
       baseName: operation.id,
       value: secret,
       updatedBy: "openclaw",
       // The worker re-checks the requester at transaction and commit admission.
       ...(ctx.assertPersistentApply ? { assertCurrent: ctx.assertPersistentApply } : {}),
-    }),
-  );
+    });
+  });
   try {
     await runConfigSet({
       runtime: createNoExitRuntime(ctx.runtime),

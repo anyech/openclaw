@@ -7,10 +7,11 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { reserveTestPortListener } from "../test-utils/port-claims.js";
+import { isSystemAgentInferenceUnavailableError } from "./inference-error.js";
 import { verifySystemAgentInferenceWithFallback } from "./inference-fallback.js";
 import { resolveSystemAgentConfiguredRouteFromConfig } from "./inference-route.js";
 import { resolveSetupInferenceWinnerError } from "./setup-inference-core.js";
-import { resolvePersistentApplyInference, verifySetupInference } from "./setup-inference-turn.js";
+import { resolvePersistentApplyInference } from "./setup-inference-turn.js";
 import { installSystemAgentClaudeCliBackendTestFixture } from "./system-agent.test-helpers.js";
 import { resolveSystemAgentVerifiedInferenceRoute } from "./verified-inference.js";
 
@@ -177,21 +178,10 @@ function probeFixture(options: ProbeOptions = {}) {
   return {
     attempts,
     readConfig: async () => {
+      await captureRuntimeConfigAsyncReader()();
       const snapshot = await readSnapshot();
       expect(snapshot.valid, JSON.stringify(snapshot.issues)).toBe(true);
       return snapshot.runtimeConfig ?? snapshot.config;
-    },
-    verify: async (params: {
-      runtime: RuntimeEnv;
-      bindSession: true;
-      agentId: string;
-      fallbackModelRef?: string;
-    }) => {
-      await captureRuntimeConfigAsyncReader()();
-      return await verifySetupInference({
-        ...params,
-        deps: { readConfigFileSnapshot: readSnapshot },
-      });
     },
   };
 }
@@ -213,7 +203,7 @@ describe("bound maintenance configured model fallbacks", () => {
           const result = await verifySystemAgentInferenceWithFallback({
             requestingAgentId: "main",
             runtime,
-            deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+            deps: { readConfig: fixture.readConfig },
           });
           expect(result.ok, JSON.stringify(result)).toBe(true);
           if (!result.ok) {
@@ -253,7 +243,7 @@ describe("bound maintenance configured model fallbacks", () => {
           const result = await verifySystemAgentInferenceWithFallback({
             requestingAgentId: "main",
             runtime,
-            deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+            deps: { readConfig: fixture.readConfig },
           });
           expect(result.ok, JSON.stringify(result)).toBe(true);
           if (!result.ok) {
@@ -301,7 +291,7 @@ describe("bound maintenance configured model fallbacks", () => {
         const result = await verifySystemAgentInferenceWithFallback({
           requestingAgentId: "main",
           runtime,
-          deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+          deps: { readConfig: fixture.readConfig },
         });
         expect(result.ok, JSON.stringify(result)).toBe(true);
         if (!result.ok) {
@@ -344,7 +334,7 @@ describe("bound maintenance configured model fallbacks", () => {
         const result = await verifySystemAgentInferenceWithFallback({
           requestingAgentId: "main",
           runtime,
-          deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+          deps: { readConfig: fixture.readConfig },
         });
         expect(result).toMatchObject({ ok: false, status: "auth" });
         expect(fixture.attempts.map(({ provider }) => provider)).toEqual(["fixture-primary"]);
@@ -397,7 +387,7 @@ describe("bound maintenance configured model fallbacks", () => {
       const result = await verifySystemAgentInferenceWithFallback({
         requestingAgentId: "main",
         runtime,
-        deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+        deps: { readConfig: fixture.readConfig },
       });
       expect(result.ok, JSON.stringify(result)).toBe(true);
       if (!result.ok) {
@@ -464,7 +454,7 @@ describe("bound maintenance configured model fallbacks", () => {
       const result = await verifySystemAgentInferenceWithFallback({
         requestingAgentId: "main",
         runtime,
-        deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+        deps: { readConfig: fixture.readConfig },
       });
       expect(result.ok, JSON.stringify(result)).toBe(true);
       if (!result.ok) {
@@ -499,7 +489,7 @@ describe("bound maintenance configured model fallbacks", () => {
       const result = await verifySystemAgentInferenceWithFallback({
         requestingAgentId: "main",
         runtime,
-        deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+        deps: { readConfig: fixture.readConfig },
       });
       expect(result.ok, JSON.stringify(result)).toBe(true);
       if (!result.ok) {
@@ -556,7 +546,7 @@ describe("bound maintenance configured model fallbacks", () => {
       const result = await verifySystemAgentInferenceWithFallback({
         requestingAgentId: "main",
         runtime,
-        deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+        deps: { readConfig: fixture.readConfig },
       });
       expect(result).toMatchObject({ ok: false, status: "unknown" });
       expect(fixture.attempts).toHaveLength(2);
@@ -575,7 +565,7 @@ describe("bound maintenance configured model fallbacks", () => {
         const result = await verifySystemAgentInferenceWithFallback({
           requestingAgentId: "main",
           runtime,
-          deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+          deps: { readConfig: fixture.readConfig },
         });
         if (!result.ok) {
           throw new Error(result.error);
@@ -620,9 +610,13 @@ describe("bound maintenance configured model fallbacks", () => {
     },
   );
 
-  it.each(["unchanged", "removed", "credential"] as const)(
-    "checks fallback ownership at the config commit with %s authority",
-    async (change) => {
+  it.each(
+    (["config", "secret"] as const).flatMap((effect) =>
+      (["unchanged", "removed", "credential"] as const).map((change) => ({ effect, change })),
+    ),
+  )(
+    "checks fallback ownership before $effect persistence with $change authority",
+    async ({ effect, change }) => {
       await withOpenClawTestState({ label: "fallback-config-commit" }, async (state) => {
         const config = configuredChain();
         await state.writeConfig(config);
@@ -630,7 +624,7 @@ describe("bound maintenance configured model fallbacks", () => {
         const result = await verifySystemAgentInferenceWithFallback({
           requestingAgentId: "main",
           runtime,
-          deps: { readConfig: fixture.readConfig, verify: fixture.verify },
+          deps: { readConfig: fixture.readConfig },
         });
         if (!result.ok) {
           throw new Error(result.error);
@@ -643,37 +637,89 @@ describe("bound maintenance configured model fallbacks", () => {
         });
         let authorityChanged = false;
         try {
-          engine.propose({
-            kind: "config-set",
-            path: "agents.defaults.thinkingDefault",
-            value: '"low"',
-          });
-          const proposal = expectDefined(engine.getPendingOperatorProposal(), "approved proposal");
-          const reply = await engine.resolveOperatorApproval("allow-once", proposal.hash, () => {
-            if (authorityChanged || change === "unchanged") {
-              return;
-            }
-            authorityChanged = true;
-            if (change === "removed") {
-              expectDefined(config.agents?.defaults, "fixture agent defaults").model = {
-                primary,
-                fallbacks: [],
-              };
-            } else {
-              expectDefined(
-                config.models?.providers?.["fixture-backup"],
-                "fixture backup provider",
-              ).apiKey = "reassigned-fixture-key";
-            }
-            // An independent config writer can change the route after the chat
-            // admission check and before this operation loads its write snapshot.
-            writeFileSync(state.configPath, JSON.stringify(config));
-          });
-          const persisted = await readSnapshot();
-          expect(persisted.config.agents?.defaults?.thinkingDefault).toBe(
-            change === "unchanged" ? "low" : undefined,
+          engine.propose(
+            effect === "secret"
+              ? {
+                  kind: "config-set-ref",
+                  path: "memory.search.remote.apiKey",
+                  source: "store",
+                  id: "FALLBACK_PERSISTENCE_PROOF",
+                  secret: "synthetic-fallback-proof-not-a-credential",
+                }
+              : {
+                  kind: "config-set",
+                  path: "agents.defaults.thinkingDefault",
+                  value: '"low"',
+                },
           );
-          expect(reply?.applied).toBe(change === "unchanged");
+          const proposal = expectDefined(engine.getPendingOperatorProposal(), "approved proposal");
+          let inferenceRejected = false;
+          const reply = await engine
+            .resolveOperatorApproval("allow-once", proposal.hash, () => {
+              if (authorityChanged || change === "unchanged") {
+                return;
+              }
+              authorityChanged = true;
+              if (change === "removed") {
+                expectDefined(config.agents?.defaults, "fixture agent defaults").model = {
+                  primary,
+                  fallbacks: [],
+                };
+              } else {
+                expectDefined(
+                  config.models?.providers?.["fixture-backup"],
+                  "fixture backup provider",
+                ).apiKey = "reassigned-fixture-key";
+              }
+              // An independent config writer can change the route after the chat
+              // admission check and before either persistent effect.
+              writeFileSync(state.configPath, JSON.stringify(config));
+            })
+            .catch((error: unknown) => {
+              if (change === "unchanged" || !isSystemAgentInferenceUnavailableError(error)) {
+                throw error;
+              }
+              inferenceRejected = true;
+              return null;
+            });
+          if (change === "unchanged") {
+            expect(reply?.applied, reply?.text).toBe(true);
+          } else {
+            expect(inferenceRejected || reply?.applied === false).toBe(true);
+          }
+          const persisted = await readSnapshot();
+          const { listSecretStoreEntries, readSecretStoreValue } =
+            await import("../secrets/store/secret-store.js");
+          const entries = await listSecretStoreEntries({ scope: { kind: "team" } });
+          const reference = persisted.sourceConfig.memory?.search?.remote?.apiKey;
+          if (effect === "config") {
+            expect(entries).toEqual([]);
+            expect(persisted.config.agents?.defaults?.thinkingDefault).toBe(
+              change === "unchanged" ? "low" : undefined,
+            );
+          } else if (change === "unchanged") {
+            expect(entries).toHaveLength(1);
+            const entry = expectDefined(entries[0], "persisted fixture secret");
+            expect(reference).toMatchObject({ source: "store", id: entry.name });
+            expect(
+              await readSecretStoreValue({ scope: { kind: "team" }, name: entry.name }),
+            ).toMatchObject({ ok: true, value: "synthetic-fallback-proof-not-a-credential" });
+          } else {
+            expect(entries).toEqual([]);
+            expect(reference).toBeUndefined();
+          }
+          process.stdout.write(
+            "[fallback-persistence-proof] " +
+              JSON.stringify({
+                effect,
+                authority: change,
+                applied: reply?.applied,
+                inferenceRejected,
+                secretEntries: entries.length,
+                configReferenceWritten: reference !== undefined,
+              }) +
+              "\n",
+          );
         } finally {
           await engine.dispose();
         }

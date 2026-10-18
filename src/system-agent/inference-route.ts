@@ -45,15 +45,11 @@ export type SystemAgentConfiguredRouteDeps = {
   modelTarget?: "utility";
   fallbackModelRef?: string;
   readConfigFileSnapshot?: typeof import("../config/config.js").readConfigFileSnapshot;
-  loadAuthProfileStoreForRuntimeAsync?: typeof import("../agents/auth-profiles/store-runtime.js").loadAuthProfileStoreForRuntimeAsync;
   pluginMetadataPlugins?: PluginMetadataSnapshot["plugins"];
 };
 type SystemAgentRouteProjectionDeps = Pick<
   SystemAgentConfiguredRouteDeps,
-  | "loadAuthProfileStoreForRuntimeAsync"
-  | "pluginMetadataPlugins"
-  | "modelTarget"
-  | "fallbackModelRef"
+  "pluginMetadataPlugins" | "modelTarget" | "fallbackModelRef"
 >;
 
 /** Carry the selected role/candidate through every ownership projection and recheck. */
@@ -250,9 +246,6 @@ export async function resolveSystemAgentConfiguredRouteFromConfig(
                 authProfileIdSource: "user",
               },
             }
-          : {}),
-        ...(deps.loadAuthProfileStoreForRuntimeAsync
-          ? { loadAuthProfileStoreForRuntimeAsync: deps.loadAuthProfileStoreForRuntimeAsync }
           : {}),
       })
     : undefined;

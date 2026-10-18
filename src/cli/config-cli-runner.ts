@@ -239,6 +239,7 @@ export async function runConfigOperations(params: {
   currentExpectation?: ConfigSetCurrentExpectation;
   beforePersistentApply?: () => void;
   beforeCommit?: () => Promise<void>;
+  databaseOnly?: true;
 }) {
   const { runtime, operations, options } = params;
   if (
@@ -261,7 +262,10 @@ export async function runConfigOperations(params: {
   if (autoManagedTargets.length > 0) {
     throw new Error(formatAutoManagedMetaError(autoManagedTargets));
   }
-  const mutationStart = await loadValidConfigForWrite(runtime);
+  const mutationStart = await loadValidConfigForWrite(
+    runtime,
+    params.databaseOnly ? { databaseOnly: true } : undefined,
+  );
   const { snapshot } = mutationStart;
   const currentExpectation = params.currentExpectation;
   let assertCurrentExpectation: (() => void) | undefined;
@@ -290,10 +294,12 @@ export async function runConfigOperations(params: {
     pluginMetadataSnapshot: mutationStart.writeOptions.basePluginMetadataSnapshot,
     env: mutationStart.writeOptions.envSnapshotForRestore,
   };
-  let currentConfig = await normalizeConfigMutationModelRefs(snapshot.resolved, {
-    ...modelNormalizationOptions,
-    normalizeProviderCatalogs: false,
-  });
+  let currentConfig = params.databaseOnly
+    ? snapshot.resolved
+    : await normalizeConfigMutationModelRefs(snapshot.resolved, {
+        ...modelNormalizationOptions,
+        normalizeProviderCatalogs: false,
+      });
   let mutationSchema: Promise<ConfigSchemaResponse | undefined> | undefined;
   const getMutationSchema = () =>
     (mutationSchema ??= import("../config/runtime-schema.js")
@@ -372,6 +378,7 @@ export async function runConfigOperations(params: {
             currentConfig,
             mutationStart.writeOptions.basePluginMetadataSnapshot,
             getDeferredPluginMigrationConfigFacts(snapshot.sourceConfig),
+            params.databaseOnly,
           );
         }
         throw new Error(message);
@@ -410,6 +417,7 @@ export async function runConfigOperations(params: {
     }
     // Only ambiguous numeric segments need schema to distinguish missing maps from arrays.
     const needsMutationSchema =
+      !params.databaseOnly &&
       params.successMode !== "patch" &&
       operation.setPath.some(
         (segment, index) =>
@@ -465,22 +473,26 @@ export async function runConfigOperations(params: {
     }
     nextConfig = coerceConfig(restored.result);
   }
-  const normalizeProviderCatalogs = shouldNormalizeConfigMutationProviderCatalogs({
-    before: snapshot.resolved,
-    after: nextConfig,
-    touchedPaths: appliedOperations.map(({ setPath }) => setPath),
-    env: modelNormalizationOptions.env,
-  });
+  const normalizeProviderCatalogs =
+    !params.databaseOnly &&
+    shouldNormalizeConfigMutationProviderCatalogs({
+      before: snapshot.resolved,
+      after: nextConfig,
+      touchedPaths: appliedOperations.map(({ setPath }) => setPath),
+      env: modelNormalizationOptions.env,
+    });
   if (normalizeProviderCatalogs) {
     currentConfig = await normalizeConfigMutationModelRefs(
       snapshot.resolved,
       modelNormalizationOptions,
     );
   }
-  nextConfig = await normalizeConfigMutationModelRefs(nextConfig, {
-    ...modelNormalizationOptions,
-    normalizeProviderCatalogs,
-  });
+  if (!params.databaseOnly) {
+    nextConfig = await normalizeConfigMutationModelRefs(nextConfig, {
+      ...modelNormalizationOptions,
+      normalizeProviderCatalogs,
+    });
+  }
   const normalizedExplicitSetPaths = explicitSetPaths.map(normalizeConfigMutationExplicitSetPath);
   // Parent merge paths own policy, but inherited children are not caller-authored values.
   const resolutionEnv = mutationStart.writeOptions.envSnapshotForRestore ?? process.env;
@@ -533,6 +545,7 @@ export async function runConfigOperations(params: {
       isDeepStrictEqual(authoredPreviousConfig, authoredNextConfig),
     pluginMetadataSnapshot: mutationStart.writeOptions.basePluginMetadataSnapshot,
     deferredPluginMigrations: getDeferredPluginMigrationConfigFacts(snapshot.sourceConfig),
+    databaseOnly: params.databaseOnly,
   });
   if (validation.kind === "dry-run") {
     printConfigDryRunResult(validation.result, runtime, options.json);
