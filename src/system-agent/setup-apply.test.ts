@@ -70,6 +70,13 @@ function startAbsent() {
 function agentConfig(agentDir: string): OpenClawConfig {
   return { agents: { defaults: { model: "openai/gpt-5.5" }, entries: { main: { agentDir } } } };
 }
+function materializePersistedSnapshot(current: ReturnType<typeof snapshot>) {
+  const result = configModule.validateConfigObjectWithPlugins(current.config);
+  if (!result.ok) {
+    throw new Error(result.issues[0]?.message ?? "persisted fixture config failed validation");
+  }
+  return { ...current, runtimeConfig: result.config };
+}
 function persistedReads(
   initial: ReturnType<typeof snapshot>,
   materialize: (config: OpenClawConfig) => OpenClawConfig,
@@ -94,7 +101,10 @@ describe("applySystemAgentSetup transaction boundaries", () => {
   it("preserves the pre-roster verified route while creating a team", async () => {
     const runtimeConfig = agentConfig("/agents/main");
     start(runtimeConfig, "probe", { agents: { defaults: { model: "openai/gpt-5.5" } } });
-    mocks.readVerifiedSnapshot.mockImplementation(async () => mocks.state.initialSnapshot);
+    mocks.readVerifiedSnapshot.mockImplementation(async () => {
+      const current = mocks.state.initialSnapshot;
+      return current.hash === "persisted" ? materializePersistedSnapshot(current) : current;
+    });
     await apply({
       expectedConfigHash: "probe",
       expectedInferenceRoute: await projectInferenceRoute(runtimeConfig),
@@ -299,7 +309,10 @@ describe("applySystemAgentSetup transaction boundaries", () => {
     } satisfies OpenClawConfig;
     const initialSnapshot = start(initial, "hash-1");
     const concurrentSnapshot = snapshot("hash-2", concurrent);
-    const persisted = () => snapshot("persisted", mocks.state.persistedConfig ?? concurrent);
+    const persisted = () =>
+      materializePersistedSnapshot(
+        snapshot("persisted", mocks.state.persistedConfig ?? concurrent),
+      );
     mocks.readSnapshot.mockImplementation(snapshotSequence(initialSnapshot, persisted));
     mocks.readVerifiedSnapshot.mockImplementation(
       snapshotSequence(initialSnapshot, initialSnapshot, concurrentSnapshot, persisted),

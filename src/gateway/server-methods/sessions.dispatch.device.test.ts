@@ -14,6 +14,7 @@ import {
 } from "../../plugins/runtime.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import {
+  closeOpenClawStateDatabaseAsync,
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
 } from "../../state/openclaw-state-db.js";
@@ -447,6 +448,7 @@ describe("sessions.dispatch device targets", () => {
         expect(harness.environments.createWithRequest).toHaveBeenCalledOnce();
         expect(placements.get("session-1")).toMatchObject({ state: "active" });
       } finally {
+        await closeOpenClawStateDatabaseAsync();
         closeOpenClawStateDatabaseForTest();
       }
     });
@@ -546,6 +548,7 @@ describe("sessions.dispatch device targets", () => {
             state: destroyFails ? "failed" : "active",
           });
         } finally {
+          await closeOpenClawStateDatabaseAsync();
           closeOpenClawStateDatabaseForTest();
         }
       },
@@ -741,6 +744,7 @@ describe("sessions.dispatch device targets", () => {
           expect.objectContaining({ message: expect.stringContaining(rejectedMessage) }),
         );
       } finally {
+        await closeOpenClawStateDatabaseAsync();
         closeOpenClawStateDatabaseForTest();
       }
     },
