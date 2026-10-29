@@ -234,7 +234,7 @@ export type ChatItem =
       boundaryId?: string;
       tone?: "danger";
       /** Informational source-owned event eligible for timeline folding. */
-      systemEvent?: "info" | "delivery-warning";
+      systemEvent?: "info";
       /** Collapse the body behind a disclosure; the label line stays visible. */
       collapsedBody?: true;
       showTimestamp?: true;
@@ -246,8 +246,8 @@ export type ChatItem =
       /** Total identical failures represented by the latest display notice. */
       repeatCount?: number;
       permissionMissing?: NodePermissionRequest;
-      /** Retained input that ended interrupted or cancelled and may be dismissed. */
-      retiredPendingInput?: { id: string; status: "interrupted" | "cancelled"; preview: string };
+      /** Retained cancelled input that may be dismissed. */
+      retiredPendingInput?: { id: string; preview: string };
     }
   | {
       kind: "divider";
@@ -374,6 +374,14 @@ export type MessageGroup = {
   messages: Array<{
     message: unknown;
     key: string;
+    /** Source row for actions when presentation splits a mixed envelope. */
+    actionKey?: string;
+    /** Original envelope supplies copy/reply/reaction/full-message actions. */
+    actionMessage?: unknown;
+    /** Only the last visible part of a split envelope owns its source footer. */
+    presentationOwnsFooter?: boolean;
+    /** Only the last split part publishes the original terminal status. */
+    presentationOwnsTerminalStatus?: boolean;
     replyTarget?: NormalizedMessage["replyTarget"];
     /** Rendered reply content, excluding assistant thinking tags. */
     hasVisibleContent: boolean;
