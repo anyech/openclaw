@@ -650,13 +650,17 @@ export async function createSystemAgentVerifiedInferenceBinding(params: {
   };
 }
 
+/** Verification must not enqueue health writes behind a transaction awaiting it. */
+export async function readSystemAgentInferenceConfigSnapshot(): Promise<ConfigFileSnapshot> {
+  return (await import("../config/config.js")).readConfigFileSnapshot({ observe: false });
+}
+
 /** Re-hash plugin-owned runtime files only at a persistent side-effect boundary. */
 export async function hasCurrentSystemAgentOwnerPluginArtifacts(
   binding: SystemAgentVerifiedInferenceBinding,
   capturedSnapshot?: ConfigFileSnapshot,
 ): Promise<boolean> {
-  const snapshot =
-    capturedSnapshot ?? (await (await import("../config/config.js")).readConfigFileSnapshot());
+  const snapshot = capturedSnapshot ?? (await readSystemAgentInferenceConfigSnapshot());
   if (!snapshot.exists || !snapshot.valid) {
     return false;
   }
@@ -688,13 +692,7 @@ export async function hasCurrentSystemAgentOwnerPluginArtifacts(
 export async function resolveSystemAgentVerifiedInferenceState(
   binding: SystemAgentVerifiedInferenceBinding,
 ): Promise<SystemAgentVerifiedInferenceState | null> {
-  // Admission is read-only: health observation would enqueue a write behind
-  // the secret transaction awaiting this guard.
-  const snapshot = await (
-    await import("../config/config.js")
-  ).readConfigFileSnapshot({
-    observe: false,
-  });
+  const snapshot = await readSystemAgentInferenceConfigSnapshot();
   if (!snapshot.exists || !snapshot.valid) {
     return null;
   }

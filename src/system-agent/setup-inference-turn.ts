@@ -64,6 +64,7 @@ import {
   captureSystemAgentOwnerPluginArtifacts,
   createSystemAgentVerifiedInferenceBinding,
   hasCurrentSystemAgentOwnerPluginArtifacts,
+  readSystemAgentInferenceConfigSnapshot,
   resolveSystemAgentVerifiedInferenceRoute,
   type SystemAgentOwnerPluginArtifactSnapshot,
   type SystemAgentVerifiedInferenceBinding,
@@ -424,7 +425,7 @@ export function verifySetupInference(
 export async function verifySetupInference(
   params: VerifySetupInferenceParams & { bindSession?: boolean },
 ): Promise<VerifySetupInferenceResult | BoundVerifySetupInferenceResult> {
-  const readSnapshot = (await import("../config/config.js")).readConfigFileSnapshot;
+  const readSnapshot = readSystemAgentInferenceConfigSnapshot;
   const snapshot = await readSnapshot();
   if (!snapshot.exists) {
     return {

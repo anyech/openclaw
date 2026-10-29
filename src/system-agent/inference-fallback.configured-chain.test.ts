@@ -623,9 +623,11 @@ describe("bound maintenance configured model fallbacks", () => {
       change,
       late: true,
     })),
+    { effect: "secret" as const, change: "unrelated" as const, late: true },
   ])(
     "checks fallback ownership before $effect persistence with $change authority late=$late",
     async ({ effect, change, late }) => {
+      const preservesInference = change === "unchanged" || change === "unrelated";
       await withOpenClawTestState({ label: "fallback-config-commit" }, async (state) => {
         const config = configuredChain();
         await state.writeConfig(config);
@@ -654,11 +656,13 @@ describe("bound maintenance configured model fallbacks", () => {
               primary,
               fallbacks: [],
             };
-          } else {
+          } else if (change === "credential") {
             expectDefined(
               config.models?.providers?.["fixture-backup"],
               "fixture backup provider",
             ).apiKey = "reassigned-fixture-key";
+          } else {
+            config.gateway = { ...config.gateway, port: 19876 };
           }
           // An independent config writer can change the route after the chat
           // admission check and before either persistent effect.
@@ -700,13 +704,13 @@ describe("bound maintenance configured model fallbacks", () => {
               late ? () => undefined : changeAuthority,
             )
             .catch((error: unknown) => {
-              if (change === "unchanged" || !isSystemAgentInferenceUnavailableError(error)) {
+              if (preservesInference || !isSystemAgentInferenceUnavailableError(error)) {
                 throw error;
               }
               inferenceRejected = true;
               return null;
             });
-          if (change === "unchanged") {
+          if (preservesInference) {
             expect(reply?.applied, reply?.text).toBe(true);
           } else {
             expect(inferenceRejected || reply?.applied === false).toBe(true);
@@ -716,12 +720,15 @@ describe("bound maintenance configured model fallbacks", () => {
             await import("../secrets/store/secret-store.js");
           const entries = await listSecretStoreEntries({ scope: { kind: "team" } });
           const reference = persisted.sourceConfig.memory?.search?.remote?.apiKey;
+          if (change === "unrelated") {
+            expect(persisted.config.gateway?.port).toBe(19876);
+          }
           if (effect === "config") {
             expect(entries).toEqual([]);
             expect(persisted.config.agents?.defaults?.thinkingDefault).toBe(
               change === "unchanged" ? "low" : undefined,
             );
-          } else if (change === "unchanged") {
+          } else if (preservesInference) {
             expect(entries).toHaveLength(1);
             const entry = expectDefined(entries[0], "persisted fixture secret");
             expect(reference).toMatchObject({ source: "store", id: entry.name });

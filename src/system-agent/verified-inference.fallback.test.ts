@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { testing as cliBackendsTesting } from "../agents/cli-backends.test-support.js";
 import { captureRuntimeConfigAsyncReader, readConfigFileSnapshot } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -27,6 +27,7 @@ it.each([
   { authority: "revoked", storedProfile: false },
   { authority: "unchanged", storedProfile: true },
   { authority: "revoked", storedProfile: true },
+  { authority: "unrelated", storedProfile: false },
 ] as const)(
   "checks $authority authority before secret persistence (stored CLI profile: $storedProfile)",
   async ({ authority, storedProfile }) => {
@@ -179,6 +180,18 @@ process.stdout.write("OK\\n");
         verifiedInference: result.binding,
         runAgentTurn: async () => null,
       });
+      const secretStore = await import("../secrets/store/secret-store.js");
+      const writeSecret = secretStore.writeSecretStoreEntryForConfigRef;
+      const writeSpy =
+        authority === "unrelated"
+          ? vi
+              .spyOn(secretStore, "writeSecretStoreEntryForConfigRef")
+              .mockImplementation((params) => {
+                config.gateway = { ...config.gateway, port: 19876 };
+                writeFileSync(state.configPath, JSON.stringify(config));
+                return writeSecret(params);
+              })
+          : undefined;
       try {
         engine.propose({
           kind: "config-set-ref",
@@ -221,6 +234,10 @@ process.stdout.write("OK\\n");
         const entries = allEntries.filter((entry) => entry.name !== credentialName);
         const saved = await readSnapshot();
         const reference = saved.sourceConfig.memory?.search?.remote?.apiKey;
+        if (authority === "unrelated") {
+          expect(saved.config.gateway?.port).toBe(19876);
+          expect(await readCalls()).toHaveLength(6);
+        }
         if (authority === "revoked") {
           expect(entries).toEqual([]);
           expect(reference).toBeUndefined();
@@ -244,6 +261,7 @@ process.stdout.write("OK\\n");
             "\n",
         );
       } finally {
+        writeSpy?.mockRestore();
         await engine.dispose();
       }
     });
