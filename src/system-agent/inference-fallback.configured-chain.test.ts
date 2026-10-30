@@ -449,13 +449,13 @@ describe("bound maintenance configured model fallbacks", () => {
         );
         const result = await (async () => {
           try {
-            const result = await verifySystemAgentInferenceWithFallback({
+            const verificationResult = await verifySystemAgentInferenceWithFallback({
               requestingAgentId: "main",
               runtime,
               config: await fixture.readConfig(),
             });
             expect(runSpy).toHaveBeenCalledTimes(1);
-            return result;
+            return verificationResult;
           } finally {
             runSpy.mockRestore();
           }
