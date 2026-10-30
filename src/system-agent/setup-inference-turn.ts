@@ -217,7 +217,7 @@ export async function runSetupInferenceTurn(params: {
     }
     if (route.authProfileId && successfulAuth?.authProfileId !== route.authProfileId) {
       return failed(
-        "auth",
+        "unknown",
         `The inference run used profile "${successfulAuth?.authProfileId ?? "unknown"}" instead of the configured profile "${route.authProfileId}".`,
       );
     }

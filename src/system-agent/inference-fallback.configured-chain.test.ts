@@ -2,6 +2,7 @@ import { writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import * as embeddedAgent from "../agents/embedded-agent.js";
 import { captureRuntimeConfigAsyncReader, readConfigFileSnapshot } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { RuntimeEnv } from "../runtime.js";
@@ -403,6 +404,67 @@ describe("bound maintenance configured model fallbacks", () => {
       );
     });
   });
+
+  it.each(["missing", "mismatch"] as const)(
+    "stops the configured fallback ladder after a pinned success with a %s owner report",
+    async (ownerReport) => {
+      await withOpenClawTestState({ label: "pinned-success-owner-uncertain" }, async (state) => {
+        const config = configuredChain();
+        config.agents!.defaults!.model = {
+          primary: "fixture-primary/first@fixture-primary:pinned",
+          fallbacks: ["fixture-backup/second@fixture-backup:pinned"],
+        };
+        await state.writeConfig(config);
+        await state.writeAuthProfiles({
+          version: 1,
+          profiles: {
+            "fixture-primary:pinned": {
+              type: "api_key",
+              provider: "fixture-primary",
+              key: "fixture-primary-key",
+            },
+            "fixture-backup:pinned": {
+              type: "api_key",
+              provider: "fixture-backup",
+              key: "fixture-backup-key",
+            },
+          },
+        });
+        const fixture = probeFixture({ primarySuccess: true });
+        const realRunEmbeddedAgent = embeddedAgent.runEmbeddedAgent;
+        const runSpy = vi.spyOn(embeddedAgent, "runEmbeddedAgent").mockImplementation((params) =>
+          realRunEmbeddedAgent({
+            ...params,
+            onSuccessfulAuthBinding: (binding) => {
+              if (binding.authProfileId !== "fixture-primary:pinned") {
+                params.onSuccessfulAuthBinding?.(binding);
+              } else if (ownerReport === "mismatch") {
+                params.onSuccessfulAuthBinding?.({
+                  ...binding,
+                  authProfileId: "fixture-primary:unexpected",
+                });
+              }
+            },
+          }),
+        );
+        const result = await (async () => {
+          try {
+            const result = await verifySystemAgentInferenceWithFallback({
+              requestingAgentId: "main",
+              runtime,
+              config: await fixture.readConfig(),
+            });
+            expect(runSpy).toHaveBeenCalledTimes(1);
+            return result;
+          } finally {
+            runSpy.mockRestore();
+          }
+        })();
+        expect(result).toMatchObject({ ok: false, status: "unknown" });
+        expect(fixture.attempts.map(({ profile }) => profile)).toEqual(["fixture-primary:pinned"]);
+      });
+    },
+  );
 
   it("preserves authored order across interleaved profile-pinned fallback references", async () => {
     await withOpenClawTestState({ label: "interleaved-fallback-pins" }, async (state) => {
